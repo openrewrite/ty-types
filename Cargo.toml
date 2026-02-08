@@ -1,0 +1,29 @@
+[package]
+name = "ty-types"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+
+[[bin]]
+name = "ty-types"
+path = "src/main.rs"
+
+[dependencies]
+ty_project = { path = "ruff/crates/ty_project", default-features = false }
+ty_python_semantic = { path = "ruff/crates/ty_python_semantic" }
+ty_static = { path = "ruff/crates/ty_static" }
+ruff_db = { path = "ruff/crates/ruff_db", default-features = false, features = ["os"] }
+ruff_python_ast = { path = "ruff/crates/ruff_python_ast" }
+ruff_text_size = { path = "ruff/crates/ruff_text_size" }
+
+anyhow = "1.0"
+rustc-hash = "2.0.0"
+salsa = { git = "https://github.com/salsa-rs/salsa.git", rev = "e9b9ddd4bec50ac777e9353bbb8f1180e5669d89" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+dbg_macro = "warn"

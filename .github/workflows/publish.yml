@@ -51,7 +51,6 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           sed -i.bak "s/^version = \"0.0.0\"/version = \"$VERSION\"/" Cargo.toml pyproject.toml
           rm -f Cargo.toml.bak pyproject.toml.bak
 
@@ -71,41 +70,6 @@ jobs:
         with:
           name: wheels-${{ matrix.name }}
           path: dist/*.whl
-
-      - name: Archive binary and checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          BIN_DIR="target/${{ matrix.target }}/release"
-
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN_NAME="ty-types.exe"
-          else
-            BIN_NAME="ty-types"
-          fi
-
-          if [ ! -f "$BIN_DIR/$BIN_NAME" ]; then
-            echo "Binary not found at $BIN_DIR/$BIN_NAME"
-            ls -la "$BIN_DIR/" || true
-            exit 1
-          fi
-
-          ARCHIVE_NAME="ty-types-${VERSION}-${{ matrix.name }}"
-          mkdir -p artifacts
-
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "artifacts/${ARCHIVE_NAME}.zip" "$BIN_DIR/$BIN_NAME"
-            sha256sum "artifacts/${ARCHIVE_NAME}.zip" > "artifacts/${ARCHIVE_NAME}.zip.sha256"
-          else
-            tar czf "artifacts/${ARCHIVE_NAME}.tar.gz" -C "$BIN_DIR" "$BIN_NAME"
-            sha256sum "artifacts/${ARCHIVE_NAME}.tar.gz" > "artifacts/${ARCHIVE_NAME}.tar.gz.sha256"
-          fi
-
-      - name: Upload binary archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifacts-${{ matrix.name }}
-          path: artifacts/*
 
   build-sdist:
     name: Build sdist
@@ -153,21 +117,3 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish -v wheels/*
-
-  github-release:
-    name: GitHub Release
-    needs: build-wheels
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Attach assets to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*

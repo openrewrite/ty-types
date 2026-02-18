@@ -93,6 +93,27 @@ pub struct NodeAttribution {
     pub node_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_id: Option<TypeId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_signature: Option<CallSignatureInfo>,
+}
+
+// ─── Call signature info ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallSignatureInfo {
+    pub parameters: Vec<ParameterInfo>,
+    pub return_type_id: Option<TypeId>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<TypeId>,
+    pub kind: &'static str,
+    pub has_default: bool,
 }
 
 // ─── Structured type descriptors ─────────────────────────────────────

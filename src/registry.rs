@@ -64,9 +64,9 @@ impl<'db> TypeRegistry<'db> {
             .collect()
     }
 
-    /// Register a type that is a component of another type (e.g., union member),
-    /// returning just its ID.
-    fn register_component(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeId {
+    /// Register a type that is a component of another type (e.g., union member,
+    /// parameter type), returning just its ID.
+    pub fn register_component(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeId {
         self.register(ty, db).type_id
     }
 
@@ -206,9 +206,7 @@ impl<'db> TypeRegistry<'db> {
 
             Type::ModuleLiteral(module_ty) => {
                 let display = self.display_string(ty, db);
-                // ModuleLiteralType::module is pub, Module::name takes &dyn salsa::Database
-                let salsa_db: &dyn salsa::Database = db;
-                let module_name = module_ty.module(salsa_db).name(salsa_db).to_string();
+                let module_name = module_ty.module(db).name(db).to_string();
                 TypeDescriptor::Module {
                     display,
                     module_name,

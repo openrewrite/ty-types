@@ -18,7 +18,7 @@ ruff_text_size = { path = "ruff/crates/ruff_text_size" }
 
 anyhow = "1.0"
 rustc-hash = "2.0.0"
-salsa = { git = "https://github.com/salsa-rs/salsa.git", rev = "e9b9ddd4bec50ac777e9353bbb8f1180e5669d89" }
+salsa = { git = "https://github.com/salsa-rs/salsa.git", rev = "53421c2fff87426fa0bb51cab06632b87646de13" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

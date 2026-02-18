@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use ruff_python_ast::{self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor};
 use ruff_text_size::Ranged;
+use ty_python_semantic::types::ide_support::{call_signature_details, find_active_signature_from_details};
+use ty_python_semantic::types::ParameterKind;
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
-use crate::protocol::{NodeAttribution, TypeDescriptor, TypeId};
+use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
 use crate::registry::TypeRegistry;
 
 pub struct CollectionResult {
@@ -61,6 +63,22 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             end: range.end().into(),
             node_kind: node_kind.to_string(),
             type_id,
+            call_signature: None,
+        });
+    }
+
+    fn record_call_node(
+        &mut self,
+        range: ruff_text_size::TextRange,
+        type_id: Option<TypeId>,
+        call_signature: Option<CallSignatureInfo>,
+    ) {
+        self.nodes.push(NodeAttribution {
+            start: range.start().into(),
+            end: range.end().into(),
+            node_kind: "ExprCall".to_string(),
+            type_id,
+            call_signature,
         });
     }
 
@@ -70,6 +88,50 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             self.new_type_ids.push(result.type_id);
         }
         result.type_id
+    }
+
+    fn build_call_signature(&mut self, call_expr: &ast::ExprCall, return_type_id: Option<TypeId>) -> Option<CallSignatureInfo> {
+        let signatures = call_signature_details(&self.model, call_expr);
+        if signatures.is_empty() {
+            return None;
+        }
+
+        let active_idx = find_active_signature_from_details(&signatures).unwrap_or(0);
+        let sig = &signatures[active_idx];
+
+        let parameters: Vec<ParameterInfo> = sig.parameter_names.iter().enumerate().map(|(i, name)| {
+            let type_id = sig.parameter_types.get(i).map(|&ty| self.register_type(ty));
+
+            let (kind, has_default) = if let Some(pk) = sig.parameter_kinds.get(i) {
+                match pk {
+                    ParameterKind::PositionalOnly { default_type, .. } => {
+                        ("positionalOnly", default_type.is_some())
+                    }
+                    ParameterKind::PositionalOrKeyword { default_type, .. } => {
+                        ("positionalOrKeyword", default_type.is_some())
+                    }
+                    ParameterKind::Variadic { .. } => ("variadic", false),
+                    ParameterKind::KeywordOnly { default_type, .. } => {
+                        ("keywordOnly", default_type.is_some())
+                    }
+                    ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
+                }
+            } else {
+                ("positionalOrKeyword", false)
+            };
+
+            ParameterInfo {
+                name: name.clone(),
+                type_id,
+                kind,
+                has_default,
+            }
+        }).collect();
+
+        Some(CallSignatureInfo {
+            parameters,
+            return_type_id,
+        })
     }
 
     fn visit_target(&mut self, target: &ast::Expr) {
@@ -142,9 +204,20 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
 
         if let Some(ty) = expr.inferred_type(&self.model) {
             let type_id = self.register_type(ty);
-            self.record_node(node_kind, expr.range(), Some(type_id));
+
+            if let ast::Expr::Call(call_expr) = expr {
+                let call_sig = self.build_call_signature(call_expr, Some(type_id));
+                self.record_call_node(expr.range(), Some(type_id), call_sig);
+            } else {
+                self.record_node(node_kind, expr.range(), Some(type_id));
+            }
         } else {
-            self.record_node(node_kind, expr.range(), None);
+            if let ast::Expr::Call(call_expr) = expr {
+                let call_sig = self.build_call_signature(call_expr, None);
+                self.record_call_node(expr.range(), None, call_sig);
+            } else {
+                self.record_node(node_kind, expr.range(), None);
+            }
         }
 
         source_order::walk_expr(self, expr);

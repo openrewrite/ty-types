@@ -1,0 +1,189 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches package versions
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          PYPROJECT_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+
+          echo "Tag version:       $TAG_VERSION"
+          echo "Cargo.toml:        $CARGO_VERSION"
+          echo "pyproject.toml:    $PYPROJECT_VERSION"
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match pyproject.toml version $PYPROJECT_VERSION"
+            exit 1
+          fi
+
+  build-wheels:
+    name: Build wheel (${{ matrix.name }})
+    needs: validate-version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: auto
+
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: auto
+
+          - name: macos-x86_64
+            runner: macos-14
+            target: x86_64-apple-darwin
+
+          - name: macos-aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist/*.whl
+
+      - name: Archive binary and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          BIN_DIR="target/${{ matrix.target }}/release"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_NAME="ty-types.exe"
+          else
+            BIN_NAME="ty-types"
+          fi
+
+          if [ ! -f "$BIN_DIR/$BIN_NAME" ]; then
+            echo "Binary not found at $BIN_DIR/$BIN_NAME"
+            ls -la "$BIN_DIR/" || true
+            exit 1
+          fi
+
+          ARCHIVE_NAME="ty-types-${TAG_VERSION}-${{ matrix.name }}"
+          mkdir -p artifacts
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "artifacts/${ARCHIVE_NAME}.zip" "$BIN_DIR/$BIN_NAME"
+            sha256sum "artifacts/${ARCHIVE_NAME}.zip" > "artifacts/${ARCHIVE_NAME}.zip.sha256"
+          else
+            tar czf "artifacts/${ARCHIVE_NAME}.tar.gz" -C "$BIN_DIR" "$BIN_NAME"
+            sha256sum "artifacts/${ARCHIVE_NAME}.tar.gz" > "artifacts/${ARCHIVE_NAME}.tar.gz.sha256"
+          fi
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.name }}
+          path: artifacts/*
+
+  build-sdist:
+    name: Build sdist
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: wheels
+          merge-multiple: true
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Publish to PyPI
+        run: uv publish -v wheels/*
+
+  github-release:
+    name: GitHub Release
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

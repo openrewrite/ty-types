@@ -81,6 +81,13 @@ pub struct GetTypeRegistryResult {
     pub types: HashMap<TypeId, TypeDescriptor>,
 }
 
+/// CLI one-shot output: nodes grouped by file, shared type registry.
+#[derive(Debug, Serialize)]
+pub struct CliResult {
+    pub files: HashMap<String, Vec<NodeAttribution>>,
+    pub types: HashMap<TypeId, TypeDescriptor>,
+}
+
 // ─── Node attribution ────────────────────────────────────────────────
 
 pub type TypeId = u32;

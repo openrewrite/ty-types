@@ -6,10 +6,11 @@ mod protocol;
 mod registry;
 
 use std::io::{self, BufRead, Write};
+use std::process;
 
 use protocol::{
-    GetTypesParams, GetTypesResult, GetTypeRegistryResult, InitializeParams, InitializeResult,
-    JsonRpcRequest, JsonRpcResponse,
+    CliResult, GetTypesParams, GetTypesResult, GetTypeRegistryResult, InitializeParams,
+    InitializeResult, JsonRpcRequest, JsonRpcResponse,
 };
 use registry::TypeRegistry;
 use ruff_db::files::system_path_to_file;
@@ -17,6 +18,127 @@ use ruff_db::system::{SystemPath, SystemPathBuf};
 use ty_project::ProjectDatabase;
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut serve = false;
+    let mut project_root: Option<String> = None;
+    let mut file_paths: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--serve" => serve = true,
+            "--project-root" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --project-root requires a value");
+                    process::exit(1);
+                }
+                project_root = Some(args[i].clone());
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("Error: unknown option '{arg}'");
+                print_usage();
+                process::exit(1);
+            }
+            _ => {
+                file_paths.push(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    if serve && !file_paths.is_empty() {
+        eprintln!("Error: --serve and FILE are mutually exclusive");
+        process::exit(1);
+    }
+
+    if serve {
+        run_serve();
+    } else if !file_paths.is_empty() {
+        run_oneshot(&file_paths, project_root.as_deref());
+    } else {
+        print_usage();
+        process::exit(1);
+    }
+}
+
+fn print_usage() {
+    eprintln!("Usage: ty-types <FILE>... [--project-root DIR]");
+    eprintln!("       ty-types --serve");
+    eprintln!();
+    eprintln!("Modes:");
+    eprintln!("  <FILE>...   Infer types for one or more Python files, print JSON to stdout");
+    eprintln!("  --serve     Run as a JSON-RPC server over stdin/stdout");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --project-root DIR   Override project root (defaults to first FILE's parent)");
+}
+
+/// One-shot mode: infer types for one or more files and print JSON to stdout.
+fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
+    let first_absolute = std::fs::canonicalize(&file_args[0]).unwrap_or_else(|e| {
+        eprintln!("Error: cannot resolve '{}': {e}", file_args[0]);
+        process::exit(1);
+    });
+
+    let root_str = match project_root_arg {
+        Some(r) => std::fs::canonicalize(r)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: cannot resolve project root '{r}': {e}");
+                process::exit(1);
+            })
+            .to_string_lossy()
+            .into_owned(),
+        None => first_absolute
+            .parent()
+            .expect("file has no parent directory")
+            .to_string_lossy()
+            .into_owned(),
+    };
+
+    let db = project::create_database(&root_str).unwrap_or_else(|e| {
+        eprintln!("Error: failed to initialize project: {e}");
+        process::exit(1);
+    });
+
+    let mut registry = TypeRegistry::new();
+    let mut files = std::collections::HashMap::new();
+
+    for file_arg in file_args {
+        let absolute = std::fs::canonicalize(file_arg).unwrap_or_else(|e| {
+            eprintln!("Error: cannot resolve '{file_arg}': {e}");
+            process::exit(1);
+        });
+
+        let sys_path = SystemPathBuf::from_path_buf(absolute.clone()).unwrap_or_else(|p| {
+            eprintln!("Error: non-Unicode path: {}", p.display());
+            process::exit(1);
+        });
+
+        let file = system_path_to_file(&db, SystemPath::new(sys_path.as_str())).unwrap_or_else(|e| {
+            eprintln!("Error: failed to resolve file '{file_arg}': {e}");
+            process::exit(1);
+        });
+
+        let result = collector::collect_types(&db, file, &mut registry);
+        files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+    }
+
+    let output = CliResult {
+        files,
+        types: registry.all_descriptors(),
+    };
+
+    serde_json::to_writer_pretty(io::stdout().lock(), &output).unwrap_or_else(|e| {
+        eprintln!("Error: failed to write JSON: {e}");
+        process::exit(1);
+    });
+    println!();
+}
+
+/// JSON-RPC server mode over stdin/stdout.
+fn run_serve() {
     let stdin = io::stdin();
     let stdout = io::stdout();
 

@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
-use ty_python_semantic::types::Type;
 use ty_python_semantic::Db;
+use ty_python_semantic::types::Type;
 
 use crate::protocol::{TypeDescriptor, TypeId};
 
@@ -298,12 +298,10 @@ impl<'db> TypeRegistry<'db> {
 fn extract_literal_string_value(display: &str) -> String {
     // Display format is like: Literal["hello"]
     // We want to extract: hello
-    if let Some(start) = display.find('"') {
-        if let Some(end) = display.rfind('"') {
-            if start < end {
-                return display[start + 1..end].to_string();
-            }
-        }
+    if let (Some(start), Some(end)) = (display.find('"'), display.rfind('"'))
+        && start < end
+    {
+        return display[start + 1..end].to_string();
     }
     display.to_string()
 }
@@ -311,12 +309,10 @@ fn extract_literal_string_value(display: &str) -> String {
 /// Extract the class name from a "<class 'ClassName'>" display
 fn extract_class_name(display: &str) -> String {
     // Display format: <class 'ClassName'>
-    if let Some(start) = display.find('\'') {
-        if let Some(end) = display.rfind('\'') {
-            if start < end {
-                return display[start + 1..end].to_string();
-            }
-        }
+    if let (Some(start), Some(end)) = (display.find('\''), display.rfind('\''))
+        && start < end
+    {
+        return display[start + 1..end].to_string();
     }
     display.to_string()
 }
@@ -326,10 +322,10 @@ fn extract_function_name(display: &str) -> String {
     // Display formats:
     //   "def name(params) -> return_type"
     //   "Overload[...]"
-    if let Some(rest) = display.strip_prefix("def ") {
-        if let Some(paren_pos) = rest.find('(') {
-            return rest[..paren_pos].to_string();
-        }
+    if let Some(rest) = display.strip_prefix("def ")
+        && let Some(paren_pos) = rest.find('(')
+    {
+        return rest[..paren_pos].to_string();
     }
     display.to_string()
 }

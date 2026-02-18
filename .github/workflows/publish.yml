@@ -13,34 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  validate-version:
-    name: Validate version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check tag matches package versions
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          PYPROJECT_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
-
-          echo "Tag version:       $TAG_VERSION"
-          echo "Cargo.toml:        $CARGO_VERSION"
-          echo "pyproject.toml:    $PYPROJECT_VERSION"
-
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag $TAG_VERSION does not match Cargo.toml version $CARGO_VERSION"
-            exit 1
-          fi
-          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
-            echo "::error::Tag $TAG_VERSION does not match pyproject.toml version $PYPROJECT_VERSION"
-            exit 1
-          fi
-
   build-wheels:
     name: Build wheel (${{ matrix.name }})
-    needs: validate-version
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -73,6 +47,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          sed -i.bak "s/^version = \"0.0.0\"/version = \"$VERSION\"/" Cargo.toml pyproject.toml
+          rm -f Cargo.toml.bak pyproject.toml.bak
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -82,7 +64,7 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --locked --out dist
+          args: --release --out dist
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -94,7 +76,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           BIN_DIR="target/${{ matrix.target }}/release"
 
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -109,7 +90,7 @@ jobs:
             exit 1
           fi
 
-          ARCHIVE_NAME="ty-types-${TAG_VERSION}-${{ matrix.name }}"
+          ARCHIVE_NAME="ty-types-${VERSION}-${{ matrix.name }}"
           mkdir -p artifacts
 
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -128,12 +109,16 @@ jobs:
 
   build-sdist:
     name: Build sdist
-    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \"0.0.0\"/version = \"$VERSION\"/" Cargo.toml pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
@@ -182,8 +167,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Attach assets to release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           files: release-assets/*

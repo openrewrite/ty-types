@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
-use ruff_python_ast::{self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor};
+use ruff_python_ast::{
+    self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor,
+};
 use ruff_text_size::Ranged;
-use ty_python_semantic::types::ide_support::{call_signature_details, find_active_signature_from_details};
 use ty_python_semantic::types::ParameterKind;
+use ty_python_semantic::types::ide_support::{
+    call_signature_details, find_active_signature_from_details,
+};
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
 use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
@@ -57,7 +61,12 @@ struct TypeCollector<'db, 'reg> {
 }
 
 impl<'db, 'reg> TypeCollector<'db, 'reg> {
-    fn record_node(&mut self, node_kind: &str, range: ruff_text_size::TextRange, type_id: Option<TypeId>) {
+    fn record_node(
+        &mut self,
+        node_kind: &str,
+        range: ruff_text_size::TextRange,
+        type_id: Option<TypeId>,
+    ) {
         self.nodes.push(NodeAttribution {
             start: range.start().into(),
             end: range.end().into(),
@@ -90,7 +99,11 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         result.type_id
     }
 
-    fn build_call_signature(&mut self, call_expr: &ast::ExprCall, return_type_id: Option<TypeId>) -> Option<CallSignatureInfo> {
+    fn build_call_signature(
+        &mut self,
+        call_expr: &ast::ExprCall,
+        return_type_id: Option<TypeId>,
+    ) -> Option<CallSignatureInfo> {
         let signatures = call_signature_details(&self.model, call_expr);
         if signatures.is_empty() {
             return None;
@@ -99,34 +112,39 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         let active_idx = find_active_signature_from_details(&signatures).unwrap_or(0);
         let sig = &signatures[active_idx];
 
-        let parameters: Vec<ParameterInfo> = sig.parameter_names.iter().enumerate().map(|(i, name)| {
-            let type_id = sig.parameter_types.get(i).map(|&ty| self.register_type(ty));
+        let parameters: Vec<ParameterInfo> = sig
+            .parameter_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let type_id = sig.parameter_types.get(i).map(|&ty| self.register_type(ty));
 
-            let (kind, has_default) = if let Some(pk) = sig.parameter_kinds.get(i) {
-                match pk {
-                    ParameterKind::PositionalOnly { default_type, .. } => {
-                        ("positionalOnly", default_type.is_some())
+                let (kind, has_default) = if let Some(pk) = sig.parameter_kinds.get(i) {
+                    match pk {
+                        ParameterKind::PositionalOnly { default_type, .. } => {
+                            ("positionalOnly", default_type.is_some())
+                        }
+                        ParameterKind::PositionalOrKeyword { default_type, .. } => {
+                            ("positionalOrKeyword", default_type.is_some())
+                        }
+                        ParameterKind::Variadic { .. } => ("variadic", false),
+                        ParameterKind::KeywordOnly { default_type, .. } => {
+                            ("keywordOnly", default_type.is_some())
+                        }
+                        ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                     }
-                    ParameterKind::PositionalOrKeyword { default_type, .. } => {
-                        ("positionalOrKeyword", default_type.is_some())
-                    }
-                    ParameterKind::Variadic { .. } => ("variadic", false),
-                    ParameterKind::KeywordOnly { default_type, .. } => {
-                        ("keywordOnly", default_type.is_some())
-                    }
-                    ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
+                } else {
+                    ("positionalOrKeyword", false)
+                };
+
+                ParameterInfo {
+                    name: name.clone(),
+                    type_id,
+                    kind,
+                    has_default,
                 }
-            } else {
-                ("positionalOrKeyword", false)
-            };
-
-            ParameterInfo {
-                name: name.clone(),
-                type_id,
-                kind,
-                has_default,
-            }
-        }).collect();
+            })
+            .collect();
 
         Some(CallSignatureInfo {
             parameters,
@@ -211,13 +229,11 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
             } else {
                 self.record_node(node_kind, expr.range(), Some(type_id));
             }
+        } else if let ast::Expr::Call(call_expr) = expr {
+            let call_sig = self.build_call_signature(call_expr, None);
+            self.record_call_node(expr.range(), None, call_sig);
         } else {
-            if let ast::Expr::Call(call_expr) = expr {
-                let call_sig = self.build_call_signature(call_expr, None);
-                self.record_call_node(expr.range(), None, call_sig);
-            } else {
-                self.record_node(node_kind, expr.range(), None);
-            }
+            self.record_node(node_kind, expr.range(), None);
         }
 
         source_order::walk_expr(self, expr);
@@ -245,7 +261,11 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
     fn visit_parameter_with_default(&mut self, parameter_with_default: &ast::ParameterWithDefault) {
         if let Some(ty) = parameter_with_default.inferred_type(&self.model) {
             let type_id = self.register_type(ty);
-            self.record_node("ParameterWithDefault", parameter_with_default.range(), Some(type_id));
+            self.record_node(
+                "ParameterWithDefault",
+                parameter_with_default.range(),
+                Some(type_id),
+            );
         } else {
             self.record_node("ParameterWithDefault", parameter_with_default.range(), None);
         }

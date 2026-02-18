@@ -10,6 +10,7 @@ fn run_session(requests: &[&str]) -> Vec<serde_json::Value> {
     let binary = env!("CARGO_BIN_EXE_ty-types");
 
     let mut child = Command::new(binary)
+        .arg("--serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -117,14 +118,20 @@ fn test_simple_types() {
     let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
 
     // Should have nodes for x, int, 42
-    assert!(nodes.len() >= 3, "expected at least 3 nodes, got {}", nodes.len());
+    assert!(
+        nodes.len() >= 3,
+        "expected at least 3 nodes, got {}",
+        nodes.len()
+    );
 
     // Find the int literal node (42)
     let lit_42_node = nodes
         .iter()
         .find(|n| n.node_kind == "ExprNumberLiteral")
         .expect("should have a number literal node");
-    let lit_42_type_id = lit_42_node.type_id.expect("number literal should have a type");
+    let lit_42_type_id = lit_42_node
+        .type_id
+        .expect("number literal should have a type");
 
     let lit_42_type = &types[&lit_42_type_id.to_string()];
     assert_eq!(lit_42_type["kind"], "intLiteral");
@@ -164,7 +171,10 @@ fn test_cross_file_resolution() {
         .iter()
         .find(|n| n.node_kind == "Alias")
         .expect("b.py should have an Alias node");
-    assert!(alias_node.type_id.is_some(), "import alias should have a type");
+    assert!(
+        alias_node.type_id.is_some(),
+        "import alias should have a type"
+    );
 }
 
 #[test]
@@ -190,10 +200,14 @@ fn test_cross_request_dedup() {
 
     // b.py should NOT re-introduce 'int' (already seen from a.py)
     let b_has_int = b_types.values().any(|t| t["display"] == "int");
-    assert!(!b_has_int, "b.py should NOT re-introduce 'int' — it was already sent with a.py");
+    assert!(
+        !b_has_int,
+        "b.py should NOT re-introduce 'int' — it was already sent with a.py"
+    );
 
     // b.py nodes should still reference the 'int' type ID from a.py
-    let b_nodes: Vec<NodeInfo> = serde_json::from_value(responses[2]["result"]["nodes"].clone()).unwrap();
+    let b_nodes: Vec<NodeInfo> =
+        serde_json::from_value(responses[2]["result"]["nodes"].clone()).unwrap();
     let int_type_id = a_types
         .iter()
         .find(|(_, t)| t["display"] == "int")
@@ -201,7 +215,10 @@ fn test_cross_request_dedup() {
         .unwrap();
 
     let b_uses_int = b_nodes.iter().any(|n| n.type_id == Some(int_type_id));
-    assert!(b_uses_int, "b.py nodes should reference the same 'int' type ID as a.py");
+    assert!(
+        b_uses_int,
+        "b.py nodes should reference the same 'int' type ID as a.py"
+    );
 }
 
 #[test]
@@ -226,29 +243,27 @@ class Animal:
     let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
 
     // Should have a function type for greet
-    let has_function = types.values().any(|t| {
-        t["kind"] == "function" && t["display"].as_str().unwrap_or("").contains("greet")
-    });
+    let has_function = types
+        .values()
+        .any(|t| t["kind"] == "function" && t["display"].as_str().unwrap_or("").contains("greet"));
     assert!(has_function, "should have a function type for 'greet'");
 
     // Should have a class literal for Animal
     let has_class = types.values().any(|t| {
-        t["kind"] == "classLiteral"
-            && t["display"].as_str().unwrap_or("").contains("Animal")
+        t["kind"] == "classLiteral" && t["display"].as_str().unwrap_or("").contains("Animal")
     });
     assert!(has_class, "should have a class literal for 'Animal'");
 
     // Should have str instance type
-    let has_str = types.values().any(|t| t["kind"] == "instance" && t["display"] == "str");
+    let has_str = types
+        .values()
+        .any(|t| t["kind"] == "instance" && t["display"] == "str");
     assert!(has_str, "should have 'str' instance type");
 }
 
 #[test]
 fn test_union_type() {
-    let dir = create_test_project(&[(
-        "u.py",
-        "x: int | str = 42\n",
-    )]);
+    let dir = create_test_project(&[("u.py", "x: int | str = 42\n")]);
 
     let responses = run_session(&[
         &initialize_request(dir.path().to_str().unwrap(), 1),
@@ -278,10 +293,7 @@ fn test_union_type() {
 
 #[test]
 fn test_type_registry() {
-    let dir = create_test_project(&[
-        ("a.py", "x: int = 42\n"),
-        ("b.py", "y: str = 'hello'\n"),
-    ]);
+    let dir = create_test_project(&[("a.py", "x: int = 42\n"), ("b.py", "y: str = 'hello'\n")]);
 
     let responses = run_session(&[
         &initialize_request(dir.path().to_str().unwrap(), 1),
@@ -306,10 +318,7 @@ fn test_type_registry() {
 
 #[test]
 fn test_error_before_initialize() {
-    let responses = run_session(&[
-        &get_types_request("a.py", 1),
-        &shutdown_request(99),
-    ]);
+    let responses = run_session(&[&get_types_request("a.py", 1), &shutdown_request(99)]);
 
     assert_eq!(responses.len(), 2);
     assert!(

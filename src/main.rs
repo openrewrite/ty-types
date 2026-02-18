@@ -9,7 +9,7 @@ use std::io::{self, BufRead, Write};
 use std::process;
 
 use protocol::{
-    CliResult, GetTypesParams, GetTypesResult, GetTypeRegistryResult, InitializeParams,
+    CliResult, GetTypeRegistryResult, GetTypesParams, GetTypesResult, InitializeParams,
     InitializeResult, JsonRpcRequest, JsonRpcResponse,
 };
 use registry::TypeRegistry;
@@ -116,10 +116,11 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
             process::exit(1);
         });
 
-        let file = system_path_to_file(&db, SystemPath::new(sys_path.as_str())).unwrap_or_else(|e| {
-            eprintln!("Error: failed to resolve file '{file_arg}': {e}");
-            process::exit(1);
-        });
+        let file =
+            system_path_to_file(&db, SystemPath::new(sys_path.as_str())).unwrap_or_else(|e| {
+                eprintln!("Error: failed to resolve file '{file_arg}': {e}");
+                process::exit(1);
+            });
 
         let result = collector::collect_types(&db, file, &mut registry);
         files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
@@ -153,9 +154,14 @@ fn run_serve() {
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                write_response(&stdout, &JsonRpcResponse::error(
-                    serde_json::Value::Null, -32700, format!("Parse error: {e}"),
-                ));
+                write_response(
+                    &stdout,
+                    &JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        -32700,
+                        format!("Parse error: {e}"),
+                    ),
+                );
                 continue;
             }
         };
@@ -164,10 +170,13 @@ fn run_serve() {
             "initialize" => {
                 let (db, root) = match do_initialize(&request) {
                     Ok(pair) => {
-                        write_response(&stdout, &JsonRpcResponse::success(
-                            request.id.clone(),
-                            serde_json::to_value(InitializeResult { ok: true }).unwrap(),
-                        ));
+                        write_response(
+                            &stdout,
+                            &JsonRpcResponse::success(
+                                request.id.clone(),
+                                serde_json::to_value(InitializeResult { ok: true }).unwrap(),
+                            ),
+                        );
                         pair
                     }
                     Err(response) => {
@@ -184,15 +193,21 @@ fn run_serve() {
                 // loop back to wait for next initialize
             }
             "shutdown" => {
-                write_response(&stdout, &JsonRpcResponse::success(
-                    request.id, serde_json::json!({"ok": true}),
-                ));
+                write_response(
+                    &stdout,
+                    &JsonRpcResponse::success(request.id, serde_json::json!({"ok": true})),
+                );
                 return;
             }
             _ => {
-                write_response(&stdout, &JsonRpcResponse::error(
-                    request.id, -32000, "Not initialized. Call 'initialize' first.".to_string(),
-                ));
+                write_response(
+                    &stdout,
+                    &JsonRpcResponse::error(
+                        request.id,
+                        -32000,
+                        "Not initialized. Call 'initialize' first.".to_string(),
+                    ),
+                );
             }
         }
     }
@@ -218,9 +233,14 @@ fn run_session(
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                write_response(stdout, &JsonRpcResponse::error(
-                    serde_json::Value::Null, -32700, format!("Parse error: {e}"),
-                ));
+                write_response(
+                    stdout,
+                    &JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        -32700,
+                        format!("Parse error: {e}"),
+                    ),
+                );
                 continue;
             }
         };
@@ -235,23 +255,32 @@ fn run_session(
                 write_response(stdout, &response);
             }
             "shutdown" => {
-                write_response(stdout, &JsonRpcResponse::success(
-                    request.id, serde_json::json!({"ok": true}),
-                ));
+                write_response(
+                    stdout,
+                    &JsonRpcResponse::success(request.id, serde_json::json!({"ok": true})),
+                );
                 return true;
             }
             "initialize" => {
                 // Re-initialize: respond with error suggesting restart
-                write_response(stdout, &JsonRpcResponse::error(
-                    request.id, -32000,
-                    "Already initialized. Send 'shutdown' first to reinitialize.".to_string(),
-                ));
+                write_response(
+                    stdout,
+                    &JsonRpcResponse::error(
+                        request.id,
+                        -32000,
+                        "Already initialized. Send 'shutdown' first to reinitialize.".to_string(),
+                    ),
+                );
             }
             _ => {
-                write_response(stdout, &JsonRpcResponse::error(
-                    request.id, -32601,
-                    format!("Method not found: {}", request.method),
-                ));
+                write_response(
+                    stdout,
+                    &JsonRpcResponse::error(
+                        request.id,
+                        -32601,
+                        format!("Method not found: {}", request.method),
+                    ),
+                );
             }
         }
     }
@@ -277,20 +306,29 @@ fn write_response(stdout: &io::Stdout, response: &JsonRpcResponse) {
     let _ = out.flush();
 }
 
-fn do_initialize(request: &JsonRpcRequest) -> Result<(ProjectDatabase, SystemPathBuf), JsonRpcResponse> {
-    let params: InitializeParams = serde_json::from_value(request.params.clone())
-        .map_err(|e| JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}")))?;
+fn do_initialize(
+    request: &JsonRpcRequest,
+) -> Result<(ProjectDatabase, SystemPathBuf), JsonRpcResponse> {
+    let params: InitializeParams = serde_json::from_value(request.params.clone()).map_err(|e| {
+        JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"))
+    })?;
 
     let root = SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.project_root))
-        .map_err(|p| JsonRpcResponse::error(
-            request.id.clone(), -32000,
-            format!("Non-Unicode path: {}", p.display()),
-        ))?;
+        .map_err(|p| {
+            JsonRpcResponse::error(
+                request.id.clone(),
+                -32000,
+                format!("Non-Unicode path: {}", p.display()),
+            )
+        })?;
 
-    let db = project::create_database(&params.project_root)
-        .map_err(|e| JsonRpcResponse::error(
-            request.id.clone(), -32000, format!("Failed to initialize: {e}"),
-        ))?;
+    let db = project::create_database(&params.project_root).map_err(|e| {
+        JsonRpcResponse::error(
+            request.id.clone(),
+            -32000,
+            format!("Failed to initialize: {e}"),
+        )
+    })?;
 
     Ok((db, root))
 }
@@ -305,7 +343,9 @@ fn handle_get_types<'db>(
         Ok(p) => p,
         Err(e) => {
             return JsonRpcResponse::error(
-                request.id.clone(), -32602, format!("Invalid params: {e}"),
+                request.id.clone(),
+                -32602,
+                format!("Invalid params: {e}"),
             );
         }
     };
@@ -321,7 +361,8 @@ fn handle_get_types<'db>(
         Ok(f) => f,
         Err(e) => {
             return JsonRpcResponse::error(
-                request.id.clone(), -32000,
+                request.id.clone(),
+                -32000,
                 format!("Failed to resolve file '{}': {e}", params.file),
             );
         }
@@ -334,19 +375,16 @@ fn handle_get_types<'db>(
         types: result.new_types,
     };
 
-    JsonRpcResponse::success(
-        request.id.clone(),
-        serde_json::to_value(response).unwrap(),
-    )
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }
 
-fn handle_get_type_registry(request: &JsonRpcRequest, registry: &TypeRegistry<'_>) -> JsonRpcResponse {
+fn handle_get_type_registry(
+    request: &JsonRpcRequest,
+    registry: &TypeRegistry<'_>,
+) -> JsonRpcResponse {
     let response = GetTypeRegistryResult {
         types: registry.all_descriptors(),
     };
 
-    JsonRpcResponse::success(
-        request.id.clone(),
-        serde_json::to_value(response).unwrap(),
-    )
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }

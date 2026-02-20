@@ -273,16 +273,42 @@ impl<'db> TypeRegistry<'db> {
 
             Type::ProtocolInstance(instance) => {
                 let display = self.display_string(ty, db);
-                let class_name = instance
-                    .to_nominal_instance()
-                    .map(|n| n.class_literal(db).name(db).to_string())
-                    .unwrap_or_else(|| format!("{}", ty.display(db)));
-                TypeDescriptor::Instance {
-                    display,
-                    class_name,
-                    module_name: None,
-                    type_args: vec![],
-                    class_id: None,
+                if let Some(nominal) = instance.to_nominal_instance() {
+                    let class_name = nominal.class_literal(db).name(db).to_string();
+
+                    let class_type = nominal.class(db);
+                    let type_args: Vec<TypeId> = class_type
+                        .static_class_literal(db)
+                        .and_then(|(_, spec)| spec)
+                        .map(|spec| {
+                            spec.types(db)
+                                .iter()
+                                .map(|&t| self.register_component(t, db))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let class_id = Some(
+                        self.register_component(Type::ClassLiteral(nominal.class_literal(db)), db),
+                    );
+
+                    TypeDescriptor::Instance {
+                        display,
+                        class_name,
+                        module_name: None,
+                        type_args,
+                        class_id,
+                    }
+                } else {
+                    // Synthesized protocols have no class backing
+                    let class_name = format!("{}", ty.display(db));
+                    TypeDescriptor::Instance {
+                        display,
+                        class_name,
+                        module_name: None,
+                        type_args: vec![],
+                        class_id: None,
+                    }
                 }
             }
 

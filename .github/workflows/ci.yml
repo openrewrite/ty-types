@@ -83,7 +83,8 @@ jobs:
     needs: [check, test]
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      python-version: ${{ steps.version.outputs.python_version }}
+      cargo-version: ${{ steps.version.outputs.cargo_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,7 +98,8 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
           NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
           TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
-          echo "version=${NEXT}.dev${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+          echo "python_version=${NEXT}.dev${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+          echo "cargo_version=${NEXT}-dev.${TIMESTAMP}" >> "$GITHUB_OUTPUT"
 
   pre-release-wheels:
     name: Pre-release wheel (${{ matrix.name }})
@@ -138,8 +140,10 @@ jobs:
       - name: Set dev version
         shell: bash
         run: |
-          VERSION="${{ needs.pre-release-version.outputs.version }}"
-          sed -i.bak "s/^version = \"0.0.0\"/version = \"$VERSION\"/" Cargo.toml pyproject.toml
+          PYTHON_VERSION="${{ needs.pre-release-version.outputs.python-version }}"
+          CARGO_VERSION="${{ needs.pre-release-version.outputs.cargo-version }}"
+          sed -i.bak "s/^version = \"0.0.0\"/version = \"$CARGO_VERSION\"/" Cargo.toml
+          sed -i.bak "s/^version = \"0.0.0\"/version = \"$PYTHON_VERSION\"/" pyproject.toml
           rm -f Cargo.toml.bak pyproject.toml.bak
 
       - uses: actions/setup-python@v5
@@ -171,8 +175,10 @@ jobs:
 
       - name: Set dev version
         run: |
-          VERSION="${{ needs.pre-release-version.outputs.version }}"
-          sed -i "s/^version = \"0.0.0\"/version = \"$VERSION\"/" Cargo.toml pyproject.toml
+          PYTHON_VERSION="${{ needs.pre-release-version.outputs.python-version }}"
+          CARGO_VERSION="${{ needs.pre-release-version.outputs.cargo-version }}"
+          sed -i "s/^version = \"0.0.0\"/version = \"$CARGO_VERSION\"/" Cargo.toml
+          sed -i "s/^version = \"0.0.0\"/version = \"$PYTHON_VERSION\"/" pyproject.toml
 
       - uses: actions/setup-python@v5
         with:

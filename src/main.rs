@@ -350,8 +350,6 @@ fn handle_get_types<'db>(
         }
     };
 
-    registry.set_include_display(params.include_display);
-
     let file_path = if std::path::Path::new(&params.file).is_absolute() {
         SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.file))
             .unwrap_or_else(|_| SystemPathBuf::from(params.file.as_str()))
@@ -372,9 +370,16 @@ fn handle_get_types<'db>(
 
     let result = collector::collect_types(db, file, registry);
 
+    let mut types = result.new_types;
+    if !params.include_display {
+        for desc in types.values_mut() {
+            desc.strip_display();
+        }
+    }
+
     let response = GetTypesResult {
         nodes: result.nodes,
-        types: result.new_types,
+        types,
     };
 
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())

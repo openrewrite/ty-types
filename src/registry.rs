@@ -1,6 +1,8 @@
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
-use ty_python_semantic::types::{ClassLiteral, LiteralValueTypeKind, ParameterKind, Type};
+use ty_python_semantic::types::{
+    ClassLiteral, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
+};
 use ty_python_semantic::types::list_members;
 
 use crate::protocol::{
@@ -15,7 +17,6 @@ pub struct TypeRegistry<'db> {
     type_to_id: FxHashMap<Type<'db>, TypeId>,
     descriptors: FxHashMap<TypeId, TypeDescriptor>,
     next_id: TypeId,
-    include_display: bool,
     /// Tracks all type IDs registered since the last `start_tracking()` call,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
@@ -32,13 +33,8 @@ impl<'db> TypeRegistry<'db> {
             type_to_id: FxHashMap::default(),
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
-            include_display: true,
             tracked_new_ids: Vec::new(),
         }
-    }
-
-    pub fn set_include_display(&mut self, include: bool) {
-        self.include_display = include;
     }
 
     /// Register a type and return its ID. If the type was already registered,
@@ -98,12 +94,8 @@ impl<'db> TypeRegistry<'db> {
         self.register(ty, db).type_id
     }
 
-    fn opt_display(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
-        if self.include_display {
-            Some(format!("{}", ty.display(db)))
-        } else {
-            None
-        }
+    fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
+        Some(format!("{}", ty.display(db)))
     }
 
     fn build_function_params(
@@ -116,6 +108,8 @@ impl<'db> TypeRegistry<'db> {
             None => return (vec![], None),
         };
         let callable_sig = func.signature(db);
+        // TODO: only the first overload is used; overloaded functions lose
+        // all but the first signature. Consider representing overloads.
         let sig = match callable_sig.iter().next() {
             Some(s) => s,
             None => return (vec![], None),
@@ -172,7 +166,7 @@ impl<'db> TypeRegistry<'db> {
     fn build_descriptor(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeDescriptor {
         match ty {
             Type::Dynamic(dynamic) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let dynamic_kind = format!("{dynamic}");
                 TypeDescriptor::Dynamic {
                     display,
@@ -181,15 +175,11 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::Never => TypeDescriptor::Never {
-                display: if self.include_display {
-                    Some("Never".to_string())
-                } else {
-                    None
-                },
+                display: Some("Never".to_string()),
             },
 
             Type::LiteralValue(literal) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 match literal.kind() {
                     LiteralValueTypeKind::Int(n) => TypeDescriptor::IntLiteral {
                         display,
@@ -219,23 +209,15 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::AlwaysTruthy => TypeDescriptor::Truthy {
-                display: if self.include_display {
-                    Some("AlwaysTruthy".to_string())
-                } else {
-                    None
-                },
+                display: Some("AlwaysTruthy".to_string()),
             },
 
             Type::AlwaysFalsy => TypeDescriptor::Falsy {
-                display: if self.include_display {
-                    Some("AlwaysFalsy".to_string())
-                } else {
-                    None
-                },
+                display: Some("AlwaysFalsy".to_string()),
             },
 
             Type::Union(union_ty) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let members: Vec<TypeId> = union_ty
                     .elements(db)
                     .iter()
@@ -245,7 +227,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::Intersection(intersection_ty) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let positive: Vec<TypeId> = intersection_ty
                     .iter_positive(db)
                     .map(|t| self.register_component(t, db))
@@ -262,7 +244,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::NominalInstance(instance) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let class_name = instance.class_literal(db).name(db).to_string();
 
                 // Extract type arguments from specialization
@@ -292,7 +274,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::ProtocolInstance(instance) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let class_name = instance
                     .to_nominal_instance()
                     .map(|n| n.class_literal(db).name(db).to_string())
@@ -307,7 +289,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::ClassLiteral(class_literal) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let supertypes: Vec<TypeId> = match class_literal {
                     ClassLiteral::Static(static_class) => static_class
@@ -348,7 +330,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::GenericAlias(alias) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let class_name = alias.origin(db).name(db).to_string();
                 TypeDescriptor::ClassLiteral {
                     display,
@@ -358,13 +340,25 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::SubclassOf(_) => {
-                let display = self.opt_display(ty, db);
-                TypeDescriptor::Other { display }
+            Type::SubclassOf(subclass_of_ty) => {
+                let display = self.display_string(ty, db);
+                let base = match subclass_of_ty.subclass_of() {
+                    ty_python_semantic::types::SubclassOfInner::Class(class_ty) => {
+                        self.register_component(
+                            Type::ClassLiteral(class_ty.class_literal(db)),
+                            db,
+                        )
+                    }
+                    _ => {
+                        // Dynamic or TypeVar — register the full type as-is
+                        self.register_component(ty, db)
+                    }
+                };
+                TypeDescriptor::SubclassOf { display, base }
             }
 
             Type::FunctionLiteral(func) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
                 let (parameters, return_type) = self.build_function_params(ty, db);
                 TypeDescriptor::Function {
@@ -376,12 +370,12 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::Callable(_) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::Callable { display }
             }
 
             Type::BoundMethod(bound) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let func = bound.function(db);
                 let func_ty = Type::FunctionLiteral(func);
                 let name = Some(func.name(db).to_string());
@@ -395,7 +389,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::KnownBoundMethod(_) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::BoundMethod {
                     display,
                     name: None,
@@ -405,7 +399,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::ModuleLiteral(module_ty) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let module_name = module_ty.module(db).name(db).to_string();
                 TypeDescriptor::Module {
                     display,
@@ -416,11 +410,7 @@ impl<'db> TypeRegistry<'db> {
             Type::TypeVar(_) => {
                 let display_str = format!("{}", ty.display(db));
                 TypeDescriptor::TypeVar {
-                    display: if self.include_display {
-                        Some(display_str.clone())
-                    } else {
-                        None
-                    },
+                    display: Some(display_str.clone()),
                     name: display_str,
                 }
             }
@@ -428,17 +418,13 @@ impl<'db> TypeRegistry<'db> {
             Type::TypeAlias(_) => {
                 let display_str = format!("{}", ty.display(db));
                 TypeDescriptor::TypeAlias {
-                    display: if self.include_display {
-                        Some(display_str.clone())
-                    } else {
-                        None
-                    },
+                    display: Some(display_str.clone()),
                     name: display_str,
                 }
             }
 
             Type::TypedDict(typed_dict) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let schema = typed_dict.items(db);
                 let fields: Vec<TypedDictFieldInfo> = schema
                     .iter()
@@ -455,13 +441,26 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::TypedDict { display, fields }
             }
 
-            Type::TypeIs(_) | Type::TypeGuard(_) => {
-                let display = self.opt_display(ty, db);
-                TypeDescriptor::Other { display }
+            Type::TypeIs(type_is) => {
+                let display = self.display_string(ty, db);
+                let narrowed_type = self.register_component(type_is.return_type(db), db);
+                TypeDescriptor::TypeIs {
+                    display,
+                    narrowed_type,
+                }
+            }
+
+            Type::TypeGuard(type_guard) => {
+                let display = self.display_string(ty, db);
+                let guarded_type = self.register_component(type_guard.return_type(db), db);
+                TypeDescriptor::TypeGuard {
+                    display,
+                    guarded_type,
+                }
             }
 
             Type::NewTypeInstance(newtype) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 let name = newtype.name(db).to_string();
                 let base_type = self.register_component(newtype.concrete_base_type(db), db);
                 TypeDescriptor::NewType {
@@ -472,7 +471,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::SpecialForm(sf) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::SpecialForm {
                     display,
                     name: format!("{sf}"),
@@ -480,12 +479,12 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::PropertyInstance(_) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::Property { display }
             }
 
             Type::KnownInstance(_) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }
             }
 
@@ -493,7 +492,7 @@ impl<'db> TypeRegistry<'db> {
             | Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
             | Type::BoundSuper(_) => {
-                let display = self.opt_display(ty, db);
+                let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }
             }
         }

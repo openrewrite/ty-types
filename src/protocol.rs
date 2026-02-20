@@ -258,7 +258,7 @@ pub enum TypeDescriptor {
     BytesLiteral {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
-        value: String, // hex-encoded
+        value: String, // display representation, e.g. Literal[b"..."]
     },
 
     #[serde(rename_all = "camelCase")]
@@ -368,4 +368,42 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
     },
+}
+
+impl TypeDescriptor {
+    /// Set the `display` field to `None`, regardless of variant.
+    pub fn strip_display(&mut self) {
+        match self {
+            Self::Instance { display, .. }
+            | Self::ClassLiteral { display, .. }
+            | Self::SubclassOf { display, .. }
+            | Self::Union { display, .. }
+            | Self::Intersection { display, .. }
+            | Self::Function { display, .. }
+            | Self::Callable { display, .. }
+            | Self::BoundMethod { display, .. }
+            | Self::IntLiteral { display, .. }
+            | Self::BoolLiteral { display, .. }
+            | Self::StringLiteral { display, .. }
+            | Self::BytesLiteral { display, .. }
+            | Self::EnumLiteral { display, .. }
+            | Self::LiteralString { display, .. }
+            | Self::Dynamic { display, .. }
+            | Self::Never { display, .. }
+            | Self::Truthy { display, .. }
+            | Self::Falsy { display, .. }
+            | Self::TypeVar { display, .. }
+            | Self::Module { display, .. }
+            | Self::TypeAlias { display, .. }
+            | Self::TypedDict { display, .. }
+            | Self::TypeIs { display, .. }
+            | Self::TypeGuard { display, .. }
+            | Self::NewType { display, .. }
+            | Self::SpecialForm { display, .. }
+            | Self::Property { display, .. }
+            | Self::Other { display, .. } => {
+                *display = None;
+            }
+        }
+    }
 }

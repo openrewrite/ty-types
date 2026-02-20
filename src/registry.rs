@@ -425,20 +425,28 @@ impl<'db> TypeRegistry<'db> {
 
             Type::TypedDict(typed_dict) => {
                 let display = self.display_string(ty, db);
+                let name = typed_dict
+                    .defining_class()
+                    .map(|c| c.name(db).to_string())
+                    .unwrap_or_default();
                 let schema = typed_dict.items(db);
                 let fields: Vec<TypedDictFieldInfo> = schema
                     .iter()
-                    .map(|(name, field)| {
+                    .map(|(field_name, field)| {
                         let type_id = self.register_component(field.declared_ty, db);
                         TypedDictFieldInfo {
-                            name: name.to_string(),
+                            name: field_name.to_string(),
                             type_id,
                             required: field.is_required(),
                             read_only: field.is_read_only(),
                         }
                     })
                     .collect();
-                TypeDescriptor::TypedDict { display, fields }
+                TypeDescriptor::TypedDict {
+                    display,
+                    name,
+                    fields,
+                }
             }
 
             Type::TypeIs(type_is) => {

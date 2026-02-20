@@ -325,6 +325,7 @@ pub enum TypeDescriptor {
     TypedDict {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
+        name: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         fields: Vec<TypedDictFieldInfo>,
     },

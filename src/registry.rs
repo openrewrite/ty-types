@@ -329,12 +329,28 @@ impl<'db> TypeRegistry<'db> {
 
             Type::GenericAlias(alias) => {
                 let display = self.display_string(ty, db);
-                let class_name = alias.origin(db).name(db).to_string();
+                let origin = alias.origin(db);
+                let class_name = origin.name(db).to_string();
+                let supertypes: Vec<TypeId> = origin
+                    .explicit_bases(db)
+                    .iter()
+                    .map(|&base| self.register_component(base, db))
+                    .collect();
+                let members: Vec<ClassMemberInfo> =
+                    list_members::all_end_of_scope_members(db, origin.body_scope(db))
+                        .map(|mwd| {
+                            let type_id = self.register_component(mwd.member.ty, db);
+                            ClassMemberInfo {
+                                name: mwd.member.name.to_string(),
+                                type_id,
+                            }
+                        })
+                        .collect();
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
-                    supertypes: vec![],
-                    members: vec![],
+                    supertypes,
+                    members,
                 }
             }
 

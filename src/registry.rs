@@ -323,18 +323,21 @@ impl<'db> TypeRegistry<'db> {
                     ClassLiteral::DynamicNamedTuple(_) => vec![],
                 };
 
-                // Extract class members
-                let all_members = list_members::all_members(db, ty);
-                let members: Vec<ClassMemberInfo> = all_members
-                    .iter()
-                    .map(|member| {
-                        let type_id = self.register_component(member.ty, db);
-                        ClassMemberInfo {
-                            name: member.name.to_string(),
-                            type_id,
-                        }
-                    })
-                    .collect();
+                // Extract directly-defined class members (not inherited)
+                let members: Vec<ClassMemberInfo> = match class_literal {
+                    ClassLiteral::Static(static_class) => {
+                        list_members::all_end_of_scope_members(db, static_class.body_scope(db))
+                            .map(|mwd| {
+                                let type_id = self.register_component(mwd.member.ty, db);
+                                ClassMemberInfo {
+                                    name: mwd.member.name.to_string(),
+                                    type_id,
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => vec![],
+                };
 
                 TypeDescriptor::ClassLiteral {
                     display,

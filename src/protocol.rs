@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 // ─── JSON-RPC envelope ───────────────────────────────────────────────
@@ -104,7 +105,7 @@ pub type TypeId = u32;
 pub struct NodeAttribution {
     pub start: u32,
     pub end: u32,
-    pub node_kind: String,
+    pub node_kind: Cow<'static, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_id: Option<TypeId>,
     #[serde(skip_serializing_if = "Option::is_none")]

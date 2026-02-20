@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use ruff_python_ast::{
@@ -54,14 +55,14 @@ struct TypeCollector<'db, 'reg> {
 impl<'db, 'reg> TypeCollector<'db, 'reg> {
     fn record_node(
         &mut self,
-        node_kind: &str,
+        node_kind: &'static str,
         range: ruff_text_size::TextRange,
         type_id: Option<TypeId>,
     ) {
         self.nodes.push(NodeAttribution {
             start: range.start().into(),
             end: range.end().into(),
-            node_kind: node_kind.to_string(),
+            node_kind: Cow::Borrowed(node_kind),
             type_id,
             call_signature: None,
         });
@@ -76,7 +77,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         self.nodes.push(NodeAttribution {
             start: range.start().into(),
             end: range.end().into(),
-            node_kind: "ExprCall".to_string(),
+            node_kind: Cow::Borrowed("ExprCall"),
             type_id,
             call_signature,
         });

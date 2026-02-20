@@ -289,10 +289,7 @@ impl<'db> TypeRegistry<'db> {
                         .unwrap_or_default();
 
                     let class_id = Some(
-                        self.register_component(
-                            Type::ClassLiteral(nominal.class_literal(db)),
-                            db,
-                        ),
+                        self.register_component(Type::ClassLiteral(nominal.class_literal(db)), db),
                     );
 
                     TypeDescriptor::Instance {

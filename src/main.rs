@@ -350,6 +350,8 @@ fn handle_get_types<'db>(
         }
     };
 
+    registry.set_include_display(params.include_display);
+
     let file_path = if std::path::Path::new(&params.file).is_absolute() {
         SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.file))
             .unwrap_or_else(|_| SystemPathBuf::from(params.file.as_str()))

@@ -57,8 +57,15 @@ pub struct InitializeParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetTypesParams {
     pub file: String,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ─── Response payloads ───────────────────────────────────────────────
@@ -123,6 +130,24 @@ pub struct ParameterInfo {
     pub has_default: bool,
 }
 
+// ─── Structured type details ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassMemberInfo {
+    pub name: String,
+    pub type_id: TypeId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypedDictFieldInfo {
+    pub name: String,
+    pub type_id: TypeId,
+    pub required: bool,
+    pub read_only: bool,
+}
+
 // ─── Structured type descriptors ─────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,37 +156,48 @@ pub enum TypeDescriptor {
     // Instance types
     #[serde(rename_all = "camelCase")]
     Instance {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         class_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_args: Vec<TypeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        class_id: Option<TypeId>,
     },
 
     // Class literal: type[MyClass]
     #[serde(rename_all = "camelCase")]
     ClassLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         class_name: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        supertypes: Vec<TypeId>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        members: Vec<ClassMemberInfo>,
     },
 
     // type[C] — subclass-of
     #[serde(rename_all = "camelCase")]
     SubclassOf {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         base: TypeId,
     },
 
     // Composite types
     Union {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         members: Vec<TypeId>,
     },
 
     #[serde(rename_all = "camelCase")]
     Intersection {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         positive: Vec<TypeId>,
         negative: Vec<TypeId>,
     },
@@ -169,132 +205,167 @@ pub enum TypeDescriptor {
     // Callables
     #[serde(rename_all = "camelCase")]
     Function {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         name: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        parameters: Vec<ParameterInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_type: Option<TypeId>,
     },
 
     #[serde(rename_all = "camelCase")]
     Callable {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     #[serde(rename_all = "camelCase")]
     BoundMethod {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        parameters: Vec<ParameterInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_type: Option<TypeId>,
     },
 
     // Literals
     #[serde(rename_all = "camelCase")]
     IntLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         value: i64,
     },
 
     #[serde(rename_all = "camelCase")]
     BoolLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         value: bool,
     },
 
     #[serde(rename_all = "camelCase")]
     StringLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         value: String,
     },
 
     #[serde(rename_all = "camelCase")]
     BytesLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         value: String, // hex-encoded
     },
 
     #[serde(rename_all = "camelCase")]
     EnumLiteral {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         class_name: String,
         member_name: String,
     },
 
     #[serde(rename_all = "camelCase")]
     LiteralString {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     // Dynamic / special
     #[serde(rename_all = "camelCase")]
     Dynamic {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         dynamic_kind: String,
     },
 
     Never {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     Truthy {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     Falsy {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     // Type system types
     #[serde(rename_all = "camelCase")]
     TypeVar {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         name: String,
     },
 
     #[serde(rename_all = "camelCase")]
     Module {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         module_name: String,
     },
 
     #[serde(rename_all = "camelCase")]
     TypeAlias {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         name: String,
     },
 
     #[serde(rename_all = "camelCase")]
     TypedDict {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<TypedDictFieldInfo>,
     },
 
     #[serde(rename_all = "camelCase")]
     TypeIs {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         narrowed_type: TypeId,
     },
 
     #[serde(rename_all = "camelCase")]
     TypeGuard {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         guarded_type: TypeId,
     },
 
     #[serde(rename_all = "camelCase")]
     NewType {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         name: String,
         base_type: TypeId,
     },
 
     #[serde(rename_all = "camelCase")]
     SpecialForm {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
         name: String,
     },
 
     #[serde(rename_all = "camelCase")]
     Property {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 
     // Fallback for internal ty types
     Other {
-        display: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
     },
 }

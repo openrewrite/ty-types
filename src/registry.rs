@@ -1,8 +1,11 @@
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
-use ty_python_semantic::types::Type;
+use ty_python_semantic::types::{ClassLiteral, LiteralValueTypeKind, ParameterKind, Type};
+use ty_python_semantic::types::list_members;
 
-use crate::protocol::{TypeDescriptor, TypeId};
+use crate::protocol::{
+    ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo,
+};
 
 /// A session-scoped registry that deduplicates types by identity.
 ///
@@ -12,6 +15,10 @@ pub struct TypeRegistry<'db> {
     type_to_id: FxHashMap<Type<'db>, TypeId>,
     descriptors: FxHashMap<TypeId, TypeDescriptor>,
     next_id: TypeId,
+    include_display: bool,
+    /// Tracks all type IDs registered since the last `start_tracking()` call,
+    /// including component types registered transitively by `build_descriptor`.
+    tracked_new_ids: Vec<TypeId>,
 }
 
 pub struct RegistrationResult {
@@ -25,7 +32,13 @@ impl<'db> TypeRegistry<'db> {
             type_to_id: FxHashMap::default(),
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
+            include_display: true,
+            tracked_new_ids: Vec::new(),
         }
+    }
+
+    pub fn set_include_display(&mut self, include: bool) {
+        self.include_display = include;
     }
 
     /// Register a type and return its ID. If the type was already registered,
@@ -44,6 +57,7 @@ impl<'db> TypeRegistry<'db> {
 
         let descriptor = self.build_descriptor(ty, db);
         self.descriptors.insert(id, descriptor);
+        self.tracked_new_ids.push(id);
 
         RegistrationResult {
             type_id: id,
@@ -64,20 +78,101 @@ impl<'db> TypeRegistry<'db> {
             .collect()
     }
 
+    /// Begin tracking newly registered types (including transitive components).
+    pub fn start_tracking(&mut self) {
+        self.tracked_new_ids.clear();
+    }
+
+    /// Drain all type IDs registered since the last `start_tracking()` call
+    /// and return their descriptors.
+    pub fn drain_new_types(&mut self) -> std::collections::HashMap<TypeId, TypeDescriptor> {
+        self.tracked_new_ids
+            .drain(..)
+            .filter_map(|id| self.descriptors.get(&id).map(|d| (id, d.clone())))
+            .collect()
+    }
+
     /// Register a type that is a component of another type (e.g., union member,
     /// parameter type), returning just its ID.
     pub fn register_component(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeId {
         self.register(ty, db).type_id
     }
 
-    fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> String {
-        format!("{}", ty.display(db))
+    fn opt_display(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
+        if self.include_display {
+            Some(format!("{}", ty.display(db)))
+        } else {
+            None
+        }
+    }
+
+    fn build_function_params(
+        &mut self,
+        func_ty: Type<'db>,
+        db: &'db dyn Db,
+    ) -> (Vec<ParameterInfo>, Option<TypeId>) {
+        let func = match func_ty.as_function_literal() {
+            Some(f) => f,
+            None => return (vec![], None),
+        };
+        let callable_sig = func.signature(db);
+        let sig = match callable_sig.iter().next() {
+            Some(s) => s,
+            None => return (vec![], None),
+        };
+
+        let parameters: Vec<ParameterInfo> = sig
+            .parameters()
+            .into_iter()
+            .map(|param| {
+                let type_id = {
+                    let ann_ty = param.annotated_type();
+                    if matches!(ann_ty, Type::Dynamic(_)) {
+                        None
+                    } else {
+                        Some(self.register_component(ann_ty, db))
+                    }
+                };
+                let name = param
+                    .display_name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let (kind, has_default) = match param.kind() {
+                    ParameterKind::PositionalOnly { default_type, .. } => {
+                        ("positionalOnly", default_type.is_some())
+                    }
+                    ParameterKind::PositionalOrKeyword { default_type, .. } => {
+                        ("positionalOrKeyword", default_type.is_some())
+                    }
+                    ParameterKind::Variadic { .. } => ("variadic", false),
+                    ParameterKind::KeywordOnly { default_type, .. } => {
+                        ("keywordOnly", default_type.is_some())
+                    }
+                    ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
+                };
+                ParameterInfo {
+                    name,
+                    type_id,
+                    kind,
+                    has_default,
+                }
+            })
+            .collect();
+
+        let return_ty = sig.return_ty;
+        let return_type = if matches!(return_ty, Type::Dynamic(_)) {
+            None
+        } else {
+            Some(self.register_component(return_ty, db))
+        };
+
+        (parameters, return_type)
     }
 
     fn build_descriptor(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeDescriptor {
         match ty {
             Type::Dynamic(dynamic) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 let dynamic_kind = format!("{dynamic}");
                 TypeDescriptor::Dynamic {
                     display,
@@ -86,46 +181,61 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::Never => TypeDescriptor::Never {
-                display: "Never".to_string(),
+                display: if self.include_display {
+                    Some("Never".to_string())
+                } else {
+                    None
+                },
             },
 
-            Type::IntLiteral(n) => TypeDescriptor::IntLiteral {
-                display: self.display_string(ty, db),
-                value: n,
-            },
-
-            Type::BooleanLiteral(b) => TypeDescriptor::BoolLiteral {
-                display: self.display_string(ty, db),
-                value: b,
-            },
-
-            Type::StringLiteral(_) => TypeDescriptor::StringLiteral {
-                display: self.display_string(ty, db),
-                // The display string includes the value as Literal["..."]
-                // We parse it out since the field accessor is pub(crate).
-                value: extract_literal_string_value(&self.display_string(ty, db)),
-            },
-
-            Type::BytesLiteral(_) => TypeDescriptor::BytesLiteral {
-                display: self.display_string(ty, db),
-                value: self.display_string(ty, db),
-            },
-
-            Type::LiteralString => TypeDescriptor::LiteralString {
-                display: "LiteralString".to_string(),
-            },
+            Type::LiteralValue(literal) => {
+                let display = self.opt_display(ty, db);
+                match literal.kind() {
+                    LiteralValueTypeKind::Int(n) => TypeDescriptor::IntLiteral {
+                        display,
+                        value: n.as_i64(),
+                    },
+                    LiteralValueTypeKind::Bool(b) => TypeDescriptor::BoolLiteral {
+                        display,
+                        value: b,
+                    },
+                    LiteralValueTypeKind::String(s) => TypeDescriptor::StringLiteral {
+                        display,
+                        value: s.value(db).to_string(),
+                    },
+                    LiteralValueTypeKind::Bytes(_) => {
+                        let value = format!("{}", ty.display(db));
+                        TypeDescriptor::BytesLiteral { display, value }
+                    }
+                    LiteralValueTypeKind::LiteralString => TypeDescriptor::LiteralString {
+                        display,
+                    },
+                    LiteralValueTypeKind::Enum(e) => TypeDescriptor::EnumLiteral {
+                        display,
+                        class_name: e.enum_class(db).name(db).to_string(),
+                        member_name: e.name(db).to_string(),
+                    },
+                }
+            }
 
             Type::AlwaysTruthy => TypeDescriptor::Truthy {
-                display: "AlwaysTruthy".to_string(),
+                display: if self.include_display {
+                    Some("AlwaysTruthy".to_string())
+                } else {
+                    None
+                },
             },
 
             Type::AlwaysFalsy => TypeDescriptor::Falsy {
-                display: "AlwaysFalsy".to_string(),
+                display: if self.include_display {
+                    Some("AlwaysFalsy".to_string())
+                } else {
+                    None
+                },
             },
 
             Type::Union(union_ty) => {
-                let display = self.display_string(ty, db);
-                // UnionType::elements is pub
+                let display = self.opt_display(ty, db);
                 let members: Vec<TypeId> = union_ty
                     .elements(db)
                     .iter()
@@ -135,8 +245,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::Intersection(intersection_ty) => {
-                let display = self.display_string(ty, db);
-                // iter_positive/iter_negative are pub
+                let display = self.opt_display(ty, db);
                 let positive: Vec<TypeId> = intersection_ty
                     .iter_positive(db)
                     .map(|t| self.register_component(t, db))
@@ -152,60 +261,148 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::NominalInstance(_) => {
-                let display = self.display_string(ty, db);
+            Type::NominalInstance(instance) => {
+                let display = self.opt_display(ty, db);
+                let class_name = instance.class_literal(db).name(db).to_string();
+
+                // Extract type arguments from specialization
+                let class_type = instance.class(db);
+                let type_args: Vec<TypeId> = class_type
+                    .static_class_literal(db)
+                    .and_then(|(_, spec)| spec)
+                    .map(|spec| {
+                        spec.types(db)
+                            .iter()
+                            .map(|&t| self.register_component(t, db))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Register the class literal as a component
+                let class_id =
+                    Some(self.register_component(Type::ClassLiteral(instance.class_literal(db)), db));
+
                 TypeDescriptor::Instance {
-                    display: display.clone(),
-                    class_name: display,
+                    display,
+                    class_name,
                     module_name: None,
-                    type_args: vec![],
+                    type_args,
+                    class_id,
                 }
             }
 
-            Type::ProtocolInstance(_) => {
-                let display = self.display_string(ty, db);
+            Type::ProtocolInstance(instance) => {
+                let display = self.opt_display(ty, db);
+                let class_name = instance
+                    .to_nominal_instance()
+                    .map(|n| n.class_literal(db).name(db).to_string())
+                    .unwrap_or_else(|| format!("{}", ty.display(db)));
                 TypeDescriptor::Instance {
-                    display: display.clone(),
-                    class_name: display,
+                    display,
+                    class_name,
                     module_name: None,
                     type_args: vec![],
+                    class_id: None,
                 }
             }
 
-            Type::ClassLiteral(_) | Type::GenericAlias(_) => {
-                let display = self.display_string(ty, db);
-                // Display is like "<class 'ClassName'>"
-                let class_name = extract_class_name(&display);
+            Type::ClassLiteral(class_literal) => {
+                let display = self.opt_display(ty, db);
+                let class_name = class_literal.name(db).to_string();
+                let supertypes: Vec<TypeId> = match class_literal {
+                    ClassLiteral::Static(static_class) => static_class
+                        .explicit_bases(db)
+                        .iter()
+                        .map(|&base| self.register_component(base, db))
+                        .collect(),
+                    ClassLiteral::Dynamic(dynamic_class) => dynamic_class
+                        .explicit_bases(db)
+                        .iter()
+                        .map(|&base| self.register_component(base, db))
+                        .collect(),
+                    ClassLiteral::DynamicNamedTuple(_) => vec![],
+                };
+
+                // Extract class members
+                let all_members = list_members::all_members(db, ty);
+                let members: Vec<ClassMemberInfo> = all_members
+                    .iter()
+                    .map(|member| {
+                        let type_id = self.register_component(member.ty, db);
+                        ClassMemberInfo {
+                            name: member.name.to_string(),
+                            type_id,
+                        }
+                    })
+                    .collect();
+
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
+                    supertypes,
+                    members,
+                }
+            }
+
+            Type::GenericAlias(alias) => {
+                let display = self.opt_display(ty, db);
+                let class_name = alias.origin(db).name(db).to_string();
+                TypeDescriptor::ClassLiteral {
+                    display,
+                    class_name,
+                    supertypes: vec![],
+                    members: vec![],
                 }
             }
 
             Type::SubclassOf(_) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Other { display }
             }
 
-            Type::FunctionLiteral(_) => {
-                let display = self.display_string(ty, db);
-                // Display format is "def name(params) -> return_type"
-                let name = extract_function_name(&display);
-                TypeDescriptor::Function { display, name }
+            Type::FunctionLiteral(func) => {
+                let display = self.opt_display(ty, db);
+                let name = func.name(db).to_string();
+                let (parameters, return_type) = self.build_function_params(ty, db);
+                TypeDescriptor::Function {
+                    display,
+                    name,
+                    parameters,
+                    return_type,
+                }
             }
 
             Type::Callable(_) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Callable { display }
             }
 
-            Type::BoundMethod(_) | Type::KnownBoundMethod(_) => {
-                let display = self.display_string(ty, db);
-                TypeDescriptor::BoundMethod { display }
+            Type::BoundMethod(bound) => {
+                let display = self.opt_display(ty, db);
+                let func = bound.function(db);
+                let func_ty = Type::FunctionLiteral(func);
+                let name = Some(func.name(db).to_string());
+                let (parameters, return_type) = self.build_function_params(func_ty, db);
+                TypeDescriptor::BoundMethod {
+                    display,
+                    name,
+                    parameters,
+                    return_type,
+                }
+            }
+
+            Type::KnownBoundMethod(_) => {
+                let display = self.opt_display(ty, db);
+                TypeDescriptor::BoundMethod {
+                    display,
+                    name: None,
+                    parameters: vec![],
+                    return_type: None,
+                }
             }
 
             Type::ModuleLiteral(module_ty) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 let module_name = module_ty.module(db).name(db).to_string();
                 TypeDescriptor::Module {
                     display,
@@ -213,49 +410,56 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::EnumLiteral(_) => {
-                let display = self.display_string(ty, db);
-                // Display is like "ClassName.MEMBER"
-                let (class_name, member_name) = extract_enum_parts(&display);
-                TypeDescriptor::EnumLiteral {
-                    display,
-                    class_name,
-                    member_name,
-                }
-            }
-
             Type::TypeVar(_) => {
-                let display = self.display_string(ty, db);
+                let display_str = format!("{}", ty.display(db));
                 TypeDescriptor::TypeVar {
-                    display: display.clone(),
-                    name: display,
+                    display: if self.include_display {
+                        Some(display_str.clone())
+                    } else {
+                        None
+                    },
+                    name: display_str,
                 }
             }
 
             Type::TypeAlias(_) => {
-                let display = self.display_string(ty, db);
+                let display_str = format!("{}", ty.display(db));
                 TypeDescriptor::TypeAlias {
-                    display: display.clone(),
-                    name: display,
+                    display: if self.include_display {
+                        Some(display_str.clone())
+                    } else {
+                        None
+                    },
+                    name: display_str,
                 }
             }
 
-            Type::TypedDict(_) => {
-                let display = self.display_string(ty, db);
-                TypeDescriptor::TypedDict { display }
+            Type::TypedDict(typed_dict) => {
+                let display = self.opt_display(ty, db);
+                let schema = typed_dict.items(db);
+                let fields: Vec<TypedDictFieldInfo> = schema
+                    .iter()
+                    .map(|(name, field)| {
+                        let type_id = self.register_component(field.declared_ty, db);
+                        TypedDictFieldInfo {
+                            name: name.to_string(),
+                            type_id,
+                            required: field.is_required(),
+                            read_only: field.is_read_only(),
+                        }
+                    })
+                    .collect();
+                TypeDescriptor::TypedDict { display, fields }
             }
 
             Type::TypeIs(_) | Type::TypeGuard(_) => {
-                // return_type accessor is private, fall back to display + Other
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Other { display }
             }
 
             Type::NewTypeInstance(newtype) => {
-                let display = self.display_string(ty, db);
-                // NewType::name is pub
+                let display = self.opt_display(ty, db);
                 let name = newtype.name(db).to_string();
-                // NewType::concrete_base_type is pub
                 let base_type = self.register_component(newtype.concrete_base_type(db), db);
                 TypeDescriptor::NewType {
                     display,
@@ -265,8 +469,7 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::SpecialForm(sf) => {
-                let display = self.display_string(ty, db);
-                // SpecialFormType implements Display
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::SpecialForm {
                     display,
                     name: format!("{sf}"),
@@ -274,12 +477,12 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::PropertyInstance(_) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Property { display }
             }
 
             Type::KnownInstance(_) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Other { display }
             }
 
@@ -287,56 +490,9 @@ impl<'db> TypeRegistry<'db> {
             | Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
             | Type::BoundSuper(_) => {
-                let display = self.display_string(ty, db);
+                let display = self.opt_display(ty, db);
                 TypeDescriptor::Other { display }
             }
         }
-    }
-}
-
-/// Extract the string value from a Literal["..."] display
-fn extract_literal_string_value(display: &str) -> String {
-    // Display format is like: Literal["hello"]
-    // We want to extract: hello
-    if let (Some(start), Some(end)) = (display.find('"'), display.rfind('"'))
-        && start < end
-    {
-        return display[start + 1..end].to_string();
-    }
-    display.to_string()
-}
-
-/// Extract the class name from a "<class 'ClassName'>" display
-fn extract_class_name(display: &str) -> String {
-    // Display format: <class 'ClassName'>
-    if let (Some(start), Some(end)) = (display.find('\''), display.rfind('\''))
-        && start < end
-    {
-        return display[start + 1..end].to_string();
-    }
-    display.to_string()
-}
-
-/// Extract the function name from a "def name(...) -> ..." display
-fn extract_function_name(display: &str) -> String {
-    // Display formats:
-    //   "def name(params) -> return_type"
-    //   "Overload[...]"
-    if let Some(rest) = display.strip_prefix("def ")
-        && let Some(paren_pos) = rest.find('(')
-    {
-        return rest[..paren_pos].to_string();
-    }
-    display.to_string()
-}
-
-/// Extract class name and member name from "ClassName.MEMBER"
-fn extract_enum_parts(display: &str) -> (String, String) {
-    if let Some(dot_pos) = display.find('.') {
-        let class_name = display[..dot_pos].to_string();
-        let member_name = display[dot_pos + 1..].to_string();
-        (class_name, member_name)
-    } else {
-        (display.to_string(), String::new())
     }
 }

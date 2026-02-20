@@ -1,13 +1,11 @@
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
+use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::{
     ClassLiteral, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
 };
-use ty_python_semantic::types::list_members;
 
-use crate::protocol::{
-    ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo,
-};
+use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
 
 /// A session-scoped registry that deduplicates types by identity.
 ///
@@ -185,10 +183,9 @@ impl<'db> TypeRegistry<'db> {
                         display,
                         value: n.as_i64(),
                     },
-                    LiteralValueTypeKind::Bool(b) => TypeDescriptor::BoolLiteral {
-                        display,
-                        value: b,
-                    },
+                    LiteralValueTypeKind::Bool(b) => {
+                        TypeDescriptor::BoolLiteral { display, value: b }
+                    }
                     LiteralValueTypeKind::String(s) => TypeDescriptor::StringLiteral {
                         display,
                         value: s.value(db).to_string(),
@@ -197,9 +194,9 @@ impl<'db> TypeRegistry<'db> {
                         let value = format!("{}", ty.display(db));
                         TypeDescriptor::BytesLiteral { display, value }
                     }
-                    LiteralValueTypeKind::LiteralString => TypeDescriptor::LiteralString {
-                        display,
-                    },
+                    LiteralValueTypeKind::LiteralString => {
+                        TypeDescriptor::LiteralString { display }
+                    }
                     LiteralValueTypeKind::Enum(e) => TypeDescriptor::EnumLiteral {
                         display,
                         class_name: e.enum_class(db).name(db).to_string(),
@@ -261,8 +258,9 @@ impl<'db> TypeRegistry<'db> {
                     .unwrap_or_default();
 
                 // Register the class literal as a component
-                let class_id =
-                    Some(self.register_component(Type::ClassLiteral(instance.class_literal(db)), db));
+                let class_id = Some(
+                    self.register_component(Type::ClassLiteral(instance.class_literal(db)), db),
+                );
 
                 TypeDescriptor::Instance {
                     display,
@@ -344,10 +342,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let base = match subclass_of_ty.subclass_of() {
                     ty_python_semantic::types::SubclassOfInner::Class(class_ty) => {
-                        self.register_component(
-                            Type::ClassLiteral(class_ty.class_literal(db)),
-                            db,
-                        )
+                        self.register_component(Type::ClassLiteral(class_ty.class_literal(db)), db)
                     }
                     _ => {
                         // Dynamic or TypeVar — register the full type as-is

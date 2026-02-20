@@ -275,20 +275,17 @@ fn test_union_type() {
     let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
 
     // Should have a union type int | str
-    let union_type = types.values().find(|t| t["kind"] == "union");
-    assert!(union_type.is_some(), "should have a union type");
+    let union_type = types
+        .values()
+        .find(|t| t["kind"] == "union" && t["display"].as_str() == Some("int | str"));
+    assert!(
+        union_type.is_some(),
+        "should have an 'int | str' union type"
+    );
 
     let union = union_type.unwrap();
     let members = union["members"].as_array().unwrap();
-    assert_eq!(members.len(), 2, "union should have 2 members");
-    assert!(
-        union["display"].as_str().unwrap().contains("int"),
-        "union display should contain 'int'"
-    );
-    assert!(
-        union["display"].as_str().unwrap().contains("str"),
-        "union display should contain 'str'"
-    );
+    assert_eq!(members.len(), 2, "int | str union should have 2 members");
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use ruff_python_ast::{
@@ -25,26 +26,18 @@ pub fn collect_types<'db>(
 ) -> CollectionResult {
     let ast = ruff_db::parsed::parsed_module(db, file).load(db);
 
+    registry.start_tracking();
+
     let mut collector = TypeCollector {
         model: SemanticModel::new(db, file),
         db,
         registry,
         nodes: Vec::new(),
-        new_type_ids: Vec::new(),
     };
 
     collector.visit_body(ast.suite());
 
-    let new_types: HashMap<TypeId, TypeDescriptor> = collector
-        .new_type_ids
-        .iter()
-        .filter_map(|&id| {
-            collector
-                .registry
-                .get_descriptor(id)
-                .map(|d| (id, d.clone()))
-        })
-        .collect();
+    let new_types = collector.registry.drain_new_types();
 
     CollectionResult {
         nodes: collector.nodes,
@@ -57,20 +50,19 @@ struct TypeCollector<'db, 'reg> {
     db: &'db dyn Db,
     registry: &'reg mut TypeRegistry<'db>,
     nodes: Vec<NodeAttribution>,
-    new_type_ids: Vec<TypeId>,
 }
 
 impl<'db, 'reg> TypeCollector<'db, 'reg> {
     fn record_node(
         &mut self,
-        node_kind: &str,
+        node_kind: &'static str,
         range: ruff_text_size::TextRange,
         type_id: Option<TypeId>,
     ) {
         self.nodes.push(NodeAttribution {
             start: range.start().into(),
             end: range.end().into(),
-            node_kind: node_kind.to_string(),
+            node_kind: Cow::Borrowed(node_kind),
             type_id,
             call_signature: None,
         });
@@ -85,18 +77,14 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         self.nodes.push(NodeAttribution {
             start: range.start().into(),
             end: range.end().into(),
-            node_kind: "ExprCall".to_string(),
+            node_kind: Cow::Borrowed("ExprCall"),
             type_id,
             call_signature,
         });
     }
 
     fn register_type(&mut self, ty: ty_python_semantic::types::Type<'db>) -> TypeId {
-        let result = self.registry.register(ty, self.db);
-        if result.is_new {
-            self.new_type_ids.push(result.type_id);
-        }
-        result.type_id
+        self.registry.register(ty, self.db).type_id
     }
 
     fn build_call_signature(

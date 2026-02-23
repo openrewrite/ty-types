@@ -94,9 +94,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
         // Get the callable type from the function expression
         let func_type = call_expr.func.inferred_type(&self.model)?;
-        let callable_type = func_type
-            .try_upcast_to_callable(db)?
-            .into_type(db);
+        let callable_type = func_type.try_upcast_to_callable(db)?.into_type(db);
 
         // Build typed arguments so check_types can infer TypeVar specializations
         let call_arguments =
@@ -113,10 +111,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         let _ = bindings.check_types_impl(db, &call_arguments, TypeContext::default(), &[]);
 
         // Pick the first matching overload (fallback to first overload)
-        let binding = bindings
-            .iter_flat()
-            .flatten()
-            .next()?;
+        let binding = bindings.iter_flat().flatten().next()?;
 
         let specialization = binding.specialization();
 

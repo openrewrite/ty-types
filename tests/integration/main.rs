@@ -408,6 +408,52 @@ fn test_non_generic_function_no_type_parameters() {
 }
 
 #[test]
+fn test_generic_call_type_arguments() {
+    let dir = create_test_project(&[(
+        "g.py",
+        "def identity[T](x: T) -> T: return x\nresult = identity(42)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("g.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let nodes: Vec<NodeInfo> = serde_json::from_value(result["nodes"].clone()).unwrap();
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the ExprCall node for identity(42)
+    let call_node = nodes
+        .iter()
+        .find(|n| n.node_kind == "ExprCall")
+        .expect("should have an ExprCall node");
+
+    let call_sig = call_node
+        .call_signature
+        .as_ref()
+        .expect("ExprCall should have a call signature");
+
+    // Should have one type argument (T resolved to int)
+    assert_eq!(
+        call_sig.type_arguments.len(),
+        1,
+        "identity(42) should have 1 type argument, got {:?}",
+        call_sig.type_arguments
+    );
+
+    // The type argument should be Literal[42] or int
+    let ta_id = call_sig.type_arguments[0].to_string();
+    let ta_type = &types[&ta_id];
+    assert!(
+        ta_type["kind"] == "intLiteral" || ta_type["kind"] == "instance",
+        "type argument should be int-like, got {:?}",
+        ta_type
+    );
+}
+
+#[test]
 fn test_error_before_initialize() {
     let responses = run_session(&[&get_types_request("a.py", 1), &shutdown_request(99)]);
 

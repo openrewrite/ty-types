@@ -336,7 +336,11 @@ fn test_generic_function_type_parameters() {
     let type_params = func_type["typeParameters"]
         .as_array()
         .expect("typeParameters should be an array");
-    assert_eq!(type_params.len(), 1, "identity[T] should have 1 type parameter");
+    assert_eq!(
+        type_params.len(),
+        1,
+        "identity[T] should have 1 type parameter"
+    );
 
     // The type parameter should point to a TypeVar named T
     let tv_id = type_params[0].to_string();
@@ -347,10 +351,7 @@ fn test_generic_function_type_parameters() {
 
 #[test]
 fn test_generic_class_type_parameters() {
-    let dir = create_test_project(&[(
-        "gc.py",
-        "class Box[T]:\n    value: T\n",
-    )]);
+    let dir = create_test_project(&[("gc.py", "class Box[T]:\n    value: T\n")]);
 
     let responses = run_session(&[
         &initialize_request(dir.path().to_str().unwrap(), 1),

@@ -213,7 +213,6 @@ pub enum TypeDescriptor {
         name: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         parameters: Vec<ParameterInfo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         return_type: Option<TypeId>,
@@ -233,7 +232,6 @@ pub enum TypeDescriptor {
         name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
         parameters: Vec<ParameterInfo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         return_type: Option<TypeId>,

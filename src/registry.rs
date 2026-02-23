@@ -420,8 +420,7 @@ impl<'db> TypeRegistry<'db> {
             Type::FunctionLiteral(func) => {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
-                let (type_parameters, parameters, return_type) =
-                    self.build_function_params(ty, db);
+                let (type_parameters, parameters, return_type) = self.build_function_params(ty, db);
                 TypeDescriptor::Function {
                     display,
                     name,

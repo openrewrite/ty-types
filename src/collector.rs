@@ -5,10 +5,8 @@ use ruff_python_ast::{
     self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor,
 };
 use ruff_text_size::Ranged;
-use ty_python_semantic::types::ParameterKind;
-use ty_python_semantic::types::ide_support::{
-    call_signature_details, find_active_signature_from_details,
-};
+use ty_python_semantic::types::call::CallArguments;
+use ty_python_semantic::types::{ParameterKind, Type, TypeContext};
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
 use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
@@ -92,41 +90,62 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         call_expr: &ast::ExprCall,
         return_type_id: Option<TypeId>,
     ) -> Option<CallSignatureInfo> {
-        let signatures = call_signature_details(&self.model, call_expr);
-        if signatures.is_empty() {
-            return None;
-        }
+        let db = self.db;
 
-        let active_idx = find_active_signature_from_details(&signatures).unwrap_or(0);
-        let sig = &signatures[active_idx];
+        // Get the callable type from the function expression
+        let func_type = call_expr.func.inferred_type(&self.model)?;
+        let callable_type = func_type.try_upcast_to_callable(db)?.into_type(db);
 
-        let parameters: Vec<ParameterInfo> = sig
-            .parameter_names
+        // Build typed arguments so check_types can infer TypeVar specializations
+        let call_arguments =
+            CallArguments::from_arguments_typed(&call_expr.arguments, |splatted_value| {
+                splatted_value
+                    .inferred_type(&self.model)
+                    .unwrap_or(Type::unknown())
+            });
+
+        // Bind parameters and run type checking to resolve specializations
+        let mut bindings = callable_type
+            .bindings(db)
+            .match_parameters(db, &call_arguments);
+        let _ = bindings.check_types_impl(db, &call_arguments, TypeContext::default(), &[]);
+
+        // Pick the first matching overload (fallback to first overload)
+        let binding = bindings.iter_flat().flatten().next()?;
+
+        let specialization = binding.specialization();
+
+        // Extract parameters from the binding's signature
+        let parameters: Vec<ParameterInfo> = binding
+            .signature
+            .parameters()
             .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let type_id = sig.parameter_types.get(i).map(|&ty| self.register_type(ty));
+            .map(|param| {
+                let mut ty = param.annotated_type();
+                if let Some(spec) = specialization {
+                    ty = ty.apply_specialization(db, spec);
+                }
+                let type_id = Some(self.register_type(ty));
 
-                let (kind, has_default) = if let Some(pk) = sig.parameter_kinds.get(i) {
-                    match pk {
-                        ParameterKind::PositionalOnly { default_type, .. } => {
-                            ("positionalOnly", default_type.is_some())
-                        }
-                        ParameterKind::PositionalOrKeyword { default_type, .. } => {
-                            ("positionalOrKeyword", default_type.is_some())
-                        }
-                        ParameterKind::Variadic { .. } => ("variadic", false),
-                        ParameterKind::KeywordOnly { default_type, .. } => {
-                            ("keywordOnly", default_type.is_some())
-                        }
-                        ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
+                let (kind, has_default) = match param.kind() {
+                    ParameterKind::PositionalOnly { default_type, .. } => {
+                        ("positionalOnly", default_type.is_some())
                     }
-                } else {
-                    ("positionalOrKeyword", false)
+                    ParameterKind::PositionalOrKeyword { default_type, .. } => {
+                        ("positionalOrKeyword", default_type.is_some())
+                    }
+                    ParameterKind::Variadic { .. } => ("variadic", false),
+                    ParameterKind::KeywordOnly { default_type, .. } => {
+                        ("keywordOnly", default_type.is_some())
+                    }
+                    ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
 
                 ParameterInfo {
-                    name: name.clone(),
+                    name: param
+                        .display_name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
                     type_id,
                     kind,
                     has_default,
@@ -134,9 +153,20 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             })
             .collect();
 
+        // Extract type arguments from the inferred specialization
+        let type_arguments: Vec<TypeId> = specialization
+            .map(|spec| {
+                spec.types(db)
+                    .iter()
+                    .map(|&ty| self.register_type(ty))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Some(CallSignatureInfo {
             parameters,
             return_type_id,
+            type_arguments,
         })
     }
 

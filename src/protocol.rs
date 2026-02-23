@@ -119,6 +119,8 @@ pub struct NodeAttribution {
 pub struct CallSignatureInfo {
     pub parameters: Vec<ParameterInfo>,
     pub return_type_id: Option<TypeId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub type_arguments: Vec<TypeId>,
 }
 
 #[derive(Debug, Clone, Serialize)]

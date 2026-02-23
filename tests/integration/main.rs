@@ -479,3 +479,186 @@ fn test_invalid_file() {
         "should return error for nonexistent file"
     );
 }
+
+#[test]
+fn test_parameter_default_type() {
+    let dir = create_test_project(&[("d.py", "def f(x: int = 42): pass\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("d.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the function type for 'f'
+    let func_type = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "f")
+        .expect("should have a function type for 'f'");
+
+    let params = func_type["parameters"].as_array().unwrap();
+    let x_param = params
+        .iter()
+        .find(|p| p["name"] == "x")
+        .expect("should have parameter 'x'");
+
+    assert_eq!(x_param["hasDefault"], true);
+    let default_id = x_param["defaultTypeId"]
+        .as_u64()
+        .expect("x should have a defaultTypeId");
+
+    // The default type should be Literal[42]
+    let default_type = &types[&default_id.to_string()];
+    assert_eq!(default_type["kind"], "intLiteral");
+    assert_eq!(default_type["value"], 42);
+}
+
+#[test]
+fn test_specialized_return_type() {
+    let dir = create_test_project(&[(
+        "g.py",
+        "def identity[T](x: T) -> T: return x\nresult = identity(42)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("g.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let nodes: Vec<NodeInfo> = serde_json::from_value(result["nodes"].clone()).unwrap();
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the ExprCall node for identity(42)
+    let call_node = nodes
+        .iter()
+        .find(|n| n.node_kind == "ExprCall")
+        .expect("should have an ExprCall node");
+
+    let call_sig = call_node
+        .call_signature
+        .as_ref()
+        .expect("ExprCall should have a call signature");
+
+    // The return type should be specialized to Literal[42], not the generic T
+    let ret_id = call_sig
+        .return_type_id
+        .expect("call signature should have a return type");
+    let ret_type = &types[&ret_id.to_string()];
+    assert_eq!(
+        ret_type["kind"], "intLiteral",
+        "specialized return type should be intLiteral, got {:?}",
+        ret_type
+    );
+    assert_eq!(ret_type["value"], 42);
+}
+
+#[test]
+fn test_instance_supertypes() {
+    let dir = create_test_project(&[(
+        "inh.py",
+        "class Animal: pass\nclass Dog(Animal): pass\nd = Dog()\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("inh.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the Instance type for Dog (the type of `d`)
+    let dog_instance = types
+        .values()
+        .find(|t| t["kind"] == "instance" && t["className"] == "Dog")
+        .expect("should have an Instance for Dog");
+
+    let supertypes = dog_instance["supertypes"]
+        .as_array()
+        .expect("Dog instance should have supertypes");
+    assert!(
+        !supertypes.is_empty(),
+        "Dog instance should have at least one supertype"
+    );
+
+    // One of the supertypes should resolve to type[Animal]
+    let has_animal_supertype = supertypes.iter().any(|st_id| {
+        let st = &types[&st_id.to_string()];
+        st["className"] == "Animal"
+    });
+    assert!(
+        has_animal_supertype,
+        "Dog's supertypes should include Animal, got: {:?}",
+        supertypes
+            .iter()
+            .map(|id| &types[&id.to_string()])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_module_names() {
+    let dir = create_test_project(&[
+        (
+            "mymodule.py",
+            "class MyClass: pass\ndef my_func() -> int: return 1\n",
+        ),
+        (
+            "main.py",
+            "from mymodule import MyClass, my_func\nx = MyClass()\ny = my_func()\n",
+        ),
+    ]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("mymodule.py", 2),
+        &get_types_request("main.py", 3),
+        &get_type_registry_request(4),
+        &shutdown_request(99),
+    ]);
+
+    let registry: TypeMap =
+        serde_json::from_value(responses[3]["result"]["types"].clone()).unwrap();
+
+    // ClassLiteral for MyClass should have module_name "mymodule"
+    let class_type = registry
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "MyClass")
+        .expect("should have classLiteral for MyClass");
+    assert_eq!(
+        class_type["moduleName"],
+        "mymodule",
+        "MyClass classLiteral should have moduleName 'mymodule', got {:?}",
+        class_type.get("moduleName")
+    );
+
+    // Function for my_func should have module_name "mymodule"
+    let func_type = registry
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "my_func")
+        .expect("should have function for my_func");
+    assert_eq!(
+        func_type["moduleName"],
+        "mymodule",
+        "my_func should have moduleName 'mymodule', got {:?}",
+        func_type.get("moduleName")
+    );
+
+    // Instance of MyClass should have module_name "mymodule"
+    let instance_type = registry
+        .values()
+        .find(|t| t["kind"] == "instance" && t["className"] == "MyClass")
+        .expect("should have instance for MyClass");
+    assert_eq!(
+        instance_type["moduleName"],
+        "mymodule",
+        "MyClass instance should have moduleName 'mymodule', got {:?}",
+        instance_type.get("moduleName")
+    );
+}

@@ -85,11 +85,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         self.registry.register(ty, self.db).type_id
     }
 
-    fn build_call_signature(
-        &mut self,
-        call_expr: &ast::ExprCall,
-        return_type_id: Option<TypeId>,
-    ) -> Option<CallSignatureInfo> {
+    fn build_call_signature(&mut self, call_expr: &ast::ExprCall) -> Option<CallSignatureInfo> {
         let db = self.db;
 
         // Get the callable type from the function expression
@@ -114,6 +110,9 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         let binding = bindings.iter_flat().flatten().next()?;
 
         let specialization = binding.specialization();
+
+        // Compute the specialized return type from the binding
+        let return_type_id = Some(self.register_type(binding.return_type()));
 
         // Extract parameters from the binding's signature
         let parameters: Vec<ParameterInfo> = binding
@@ -141,6 +140,8 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
 
+                let default_type_id = param.default_type().map(|dt| self.register_type(dt));
+
                 ParameterInfo {
                     name: param
                         .display_name()
@@ -149,6 +150,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
                     type_id,
                     kind,
                     has_default,
+                    default_type_id,
                 }
             })
             .collect();
@@ -242,13 +244,13 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
             let type_id = self.register_type(ty);
 
             if let ast::Expr::Call(call_expr) = expr {
-                let call_sig = self.build_call_signature(call_expr, Some(type_id));
+                let call_sig = self.build_call_signature(call_expr);
                 self.record_call_node(expr.range(), Some(type_id), call_sig);
             } else {
                 self.record_node(node_kind, expr.range(), Some(type_id));
             }
         } else if let ast::Expr::Call(call_expr) = expr {
-            let call_sig = self.build_call_signature(call_expr, None);
+            let call_sig = self.build_call_signature(call_expr);
             self.record_call_node(expr.range(), None, call_sig);
         } else {
             self.record_node(node_kind, expr.range(), None);

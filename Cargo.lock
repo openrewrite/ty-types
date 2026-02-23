@@ -1930,6 +1930,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ty_module_resolver",
  "ty_project",
  "ty_python_semantic",
  "ty_static",

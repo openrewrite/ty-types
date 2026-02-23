@@ -314,6 +314,100 @@ fn test_type_registry() {
 }
 
 #[test]
+fn test_generic_function_type_parameters() {
+    let dir = create_test_project(&[("g.py", "def identity[T](x: T) -> T: return x\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("g.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the function type for 'identity'
+    let func_type = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "identity")
+        .expect("should have a function type for 'identity'");
+
+    // Should have typeParameters with one entry
+    let type_params = func_type["typeParameters"]
+        .as_array()
+        .expect("typeParameters should be an array");
+    assert_eq!(
+        type_params.len(),
+        1,
+        "identity[T] should have 1 type parameter"
+    );
+
+    // The type parameter should point to a TypeVar named T
+    let tv_id = type_params[0].to_string();
+    let tv_type = &types[&tv_id];
+    assert_eq!(tv_type["kind"], "typeVar");
+    assert_eq!(tv_type["name"], "T");
+}
+
+#[test]
+fn test_generic_class_type_parameters() {
+    let dir = create_test_project(&[("gc.py", "class Box[T]:\n    value: T\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("gc.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the class literal for 'Box'
+    let class_type = types
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Box")
+        .expect("should have a classLiteral for 'Box'");
+
+    // Should have typeParameters with one entry
+    let type_params = class_type["typeParameters"]
+        .as_array()
+        .expect("typeParameters should be an array");
+    assert_eq!(type_params.len(), 1, "Box[T] should have 1 type parameter");
+
+    // The type parameter should point to a TypeVar named T
+    let tv_id = type_params[0].to_string();
+    let tv_type = &types[&tv_id];
+    assert_eq!(tv_type["kind"], "typeVar");
+    assert_eq!(tv_type["name"], "T");
+}
+
+#[test]
+fn test_non_generic_function_no_type_parameters() {
+    let dir = create_test_project(&[("ng.py", "def add(a: int, b: int) -> int: return a + b\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("ng.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the function type for 'add'
+    let func_type = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "add")
+        .expect("should have a function type for 'add'");
+
+    // typeParameters should be absent (skip_serializing_if = "Vec::is_empty")
+    assert!(
+        func_type.get("typeParameters").is_none(),
+        "non-generic function should not have typeParameters key"
+    );
+}
+
+#[test]
 fn test_error_before_initialize() {
     let responses = run_session(&[&get_types_request("a.py", 1), &shutdown_request(99)]);
 

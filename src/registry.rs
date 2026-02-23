@@ -92,6 +92,10 @@ impl<'db> TypeRegistry<'db> {
         self.register(ty, db).type_id
     }
 
+    fn resolve_module_name(&self, db: &'db dyn Db, file: ruff_db::files::File) -> Option<String> {
+        ty_module_resolver::file_to_module(db, file).map(|m| m.name(db).to_string())
+    }
+
     fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
         Some(format!("{}", ty.display(db)))
     }
@@ -111,6 +115,26 @@ impl<'db> TypeRegistry<'db> {
         vars.into_iter()
             .map(|bound_tv| self.register_component(Type::TypeVar(bound_tv), db))
             .collect()
+    }
+
+    fn supertypes_from_class_literal(
+        &mut self,
+        cl: ClassLiteral<'db>,
+        db: &'db dyn Db,
+    ) -> Vec<TypeId> {
+        match cl {
+            ClassLiteral::Static(static_class) => static_class
+                .explicit_bases(db)
+                .iter()
+                .map(|&base| self.register_component(base, db))
+                .collect(),
+            ClassLiteral::Dynamic(dynamic_class) => dynamic_class
+                .explicit_bases(db)
+                .iter()
+                .map(|&base| self.register_component(base, db))
+                .collect(),
+            ClassLiteral::DynamicNamedTuple(_) => vec![],
+        }
     }
 
     fn build_function_params(
@@ -161,11 +185,15 @@ impl<'db> TypeRegistry<'db> {
                     }
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
+                let default_type_id = param
+                    .default_type()
+                    .map(|dt| self.register_component(dt, db));
                 ParameterInfo {
                     name,
                     type_id,
                     kind,
                     has_default,
+                    default_type_id,
                 }
             })
             .collect();
@@ -261,7 +289,11 @@ impl<'db> TypeRegistry<'db> {
 
             Type::NominalInstance(instance) => {
                 let display = self.display_string(ty, db);
-                let class_name = instance.class_literal(db).name(db).to_string();
+                let cl = instance.class_literal(db);
+                let class_name = cl.name(db).to_string();
+                let module_name = instance.class_module_name(db).map(|m| m.to_string());
+
+                let supertypes = self.supertypes_from_class_literal(cl, db);
 
                 // Extract type arguments from specialization
                 let class_type = instance.class(db);
@@ -277,14 +309,13 @@ impl<'db> TypeRegistry<'db> {
                     .unwrap_or_default();
 
                 // Register the class literal as a component
-                let class_id = Some(
-                    self.register_component(Type::ClassLiteral(instance.class_literal(db)), db),
-                );
+                let class_id = Some(self.register_component(Type::ClassLiteral(cl), db));
 
                 TypeDescriptor::Instance {
                     display,
                     class_name,
-                    module_name: None,
+                    module_name,
+                    supertypes,
                     type_args,
                     class_id,
                 }
@@ -293,7 +324,11 @@ impl<'db> TypeRegistry<'db> {
             Type::ProtocolInstance(instance) => {
                 let display = self.display_string(ty, db);
                 if let Some(nominal) = instance.to_nominal_instance() {
-                    let class_name = nominal.class_literal(db).name(db).to_string();
+                    let cl = nominal.class_literal(db);
+                    let class_name = cl.name(db).to_string();
+                    let module_name = nominal.class_module_name(db).map(|m| m.to_string());
+
+                    let supertypes = self.supertypes_from_class_literal(cl, db);
 
                     let class_type = nominal.class(db);
                     let type_args: Vec<TypeId> = class_type
@@ -307,14 +342,13 @@ impl<'db> TypeRegistry<'db> {
                         })
                         .unwrap_or_default();
 
-                    let class_id = Some(
-                        self.register_component(Type::ClassLiteral(nominal.class_literal(db)), db),
-                    );
+                    let class_id = Some(self.register_component(Type::ClassLiteral(cl), db));
 
                     TypeDescriptor::Instance {
                         display,
                         class_name,
-                        module_name: None,
+                        module_name,
+                        supertypes,
                         type_args,
                         class_id,
                     }
@@ -325,6 +359,7 @@ impl<'db> TypeRegistry<'db> {
                         display,
                         class_name,
                         module_name: None,
+                        supertypes: vec![],
                         type_args: vec![],
                         class_id: None,
                     }
@@ -334,21 +369,10 @@ impl<'db> TypeRegistry<'db> {
             Type::ClassLiteral(class_literal) => {
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
+                let module_name = self.resolve_module_name(db, class_literal.file(db));
                 let type_parameters =
                     self.build_type_parameters(class_literal.generic_context(db), db);
-                let supertypes: Vec<TypeId> = match class_literal {
-                    ClassLiteral::Static(static_class) => static_class
-                        .explicit_bases(db)
-                        .iter()
-                        .map(|&base| self.register_component(base, db))
-                        .collect(),
-                    ClassLiteral::Dynamic(dynamic_class) => dynamic_class
-                        .explicit_bases(db)
-                        .iter()
-                        .map(|&base| self.register_component(base, db))
-                        .collect(),
-                    ClassLiteral::DynamicNamedTuple(_) => vec![],
-                };
+                let supertypes = self.supertypes_from_class_literal(class_literal, db);
 
                 // Extract directly-defined class members (not inherited)
                 let members: Vec<ClassMemberInfo> = match class_literal {
@@ -369,6 +393,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
+                    module_name,
                     type_parameters,
                     supertypes,
                     members,
@@ -379,6 +404,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let origin = alias.origin(db);
                 let class_name = origin.name(db).to_string();
+                let module_name = self.resolve_module_name(db, origin.file(db));
                 let supertypes: Vec<TypeId> = origin
                     .explicit_bases(db)
                     .iter()
@@ -397,6 +423,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
+                    module_name,
                     type_parameters: vec![],
                     supertypes,
                     members,
@@ -420,10 +447,12 @@ impl<'db> TypeRegistry<'db> {
             Type::FunctionLiteral(func) => {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
+                let module_name = self.resolve_module_name(db, func.file(db));
                 let (type_parameters, parameters, return_type) = self.build_function_params(ty, db);
                 TypeDescriptor::Function {
                     display,
                     name,
+                    module_name,
                     type_parameters,
                     parameters,
                     return_type,
@@ -440,11 +469,13 @@ impl<'db> TypeRegistry<'db> {
                 let func = bound.function(db);
                 let func_ty = Type::FunctionLiteral(func);
                 let name = Some(func.name(db).to_string());
+                let module_name = self.resolve_module_name(db, func.file(db));
                 let (type_parameters, parameters, return_type) =
                     self.build_function_params(func_ty, db);
                 TypeDescriptor::BoundMethod {
                     display,
                     name,
+                    module_name,
                     type_parameters,
                     parameters,
                     return_type,
@@ -456,6 +487,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::BoundMethod {
                     display,
                     name: None,
+                    module_name: None,
                     type_parameters: vec![],
                     parameters: vec![],
                     return_type: None,

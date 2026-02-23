@@ -131,6 +131,8 @@ pub struct ParameterInfo {
     pub type_id: Option<TypeId>,
     pub kind: &'static str,
     pub has_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_type_id: Option<TypeId>,
 }
 
 // ─── Structured type details ─────────────────────────────────────────
@@ -165,6 +167,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        supertypes: Vec<TypeId>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         type_args: Vec<TypeId>,
         #[serde(skip_serializing_if = "Option::is_none")]
         class_id: Option<TypeId>,
@@ -176,6 +180,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -213,6 +219,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,
@@ -232,6 +240,8 @@ pub enum TypeDescriptor {
         display: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,

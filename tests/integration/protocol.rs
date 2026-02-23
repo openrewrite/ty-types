@@ -29,4 +29,6 @@ pub struct ParameterInfo {
     pub type_id: Option<u32>,
     pub kind: String,
     pub has_default: bool,
+    #[serde(default)]
+    pub default_type_id: Option<u32>,
 }

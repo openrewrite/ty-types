@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::{
-    ClassLiteral, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
+    ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
 };
 
 use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
@@ -96,22 +96,41 @@ impl<'db> TypeRegistry<'db> {
         Some(format!("{}", ty.display(db)))
     }
 
+    fn build_type_parameters(
+        &mut self,
+        generic_context: Option<GenericContext<'db>>,
+        db: &'db dyn Db,
+    ) -> Vec<TypeId> {
+        let Some(ctx) = generic_context else {
+            return vec![];
+        };
+        let vars: Vec<_> = ctx
+            .variables(db)
+            .filter(|bound_tv| !bound_tv.typevar(db).is_self(db))
+            .collect();
+        vars.into_iter()
+            .map(|bound_tv| self.register_component(Type::TypeVar(bound_tv), db))
+            .collect()
+    }
+
     fn build_function_params(
         &mut self,
         func_ty: Type<'db>,
         db: &'db dyn Db,
-    ) -> (Vec<ParameterInfo>, Option<TypeId>) {
+    ) -> (Vec<TypeId>, Vec<ParameterInfo>, Option<TypeId>) {
         let func = match func_ty.as_function_literal() {
             Some(f) => f,
-            None => return (vec![], None),
+            None => return (vec![], vec![], None),
         };
         let callable_sig = func.signature(db);
         // TODO: only the first overload is used; overloaded functions lose
         // all but the first signature. Consider representing overloads.
         let sig = match callable_sig.iter().next() {
             Some(s) => s,
-            None => return (vec![], None),
+            None => return (vec![], vec![], None),
         };
+
+        let type_parameters = self.build_type_parameters(sig.generic_context, db);
 
         let parameters: Vec<ParameterInfo> = sig
             .parameters()
@@ -158,7 +177,7 @@ impl<'db> TypeRegistry<'db> {
             Some(self.register_component(return_ty, db))
         };
 
-        (parameters, return_type)
+        (type_parameters, parameters, return_type)
     }
 
     fn build_descriptor(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeDescriptor {
@@ -315,6 +334,8 @@ impl<'db> TypeRegistry<'db> {
             Type::ClassLiteral(class_literal) => {
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
+                let type_parameters =
+                    self.build_type_parameters(class_literal.generic_context(db), db);
                 let supertypes: Vec<TypeId> = match class_literal {
                     ClassLiteral::Static(static_class) => static_class
                         .explicit_bases(db)
@@ -348,6 +369,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
+                    type_parameters,
                     supertypes,
                     members,
                 }
@@ -375,6 +397,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,
+                    type_parameters: vec![],
                     supertypes,
                     members,
                 }
@@ -397,10 +420,12 @@ impl<'db> TypeRegistry<'db> {
             Type::FunctionLiteral(func) => {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
-                let (parameters, return_type) = self.build_function_params(ty, db);
+                let (type_parameters, parameters, return_type) =
+                    self.build_function_params(ty, db);
                 TypeDescriptor::Function {
                     display,
                     name,
+                    type_parameters,
                     parameters,
                     return_type,
                 }
@@ -416,10 +441,12 @@ impl<'db> TypeRegistry<'db> {
                 let func = bound.function(db);
                 let func_ty = Type::FunctionLiteral(func);
                 let name = Some(func.name(db).to_string());
-                let (parameters, return_type) = self.build_function_params(func_ty, db);
+                let (type_parameters, parameters, return_type) =
+                    self.build_function_params(func_ty, db);
                 TypeDescriptor::BoundMethod {
                     display,
                     name,
+                    type_parameters,
                     parameters,
                     return_type,
                 }
@@ -430,6 +457,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::BoundMethod {
                     display,
                     name: None,
+                    type_parameters: vec![],
                     parameters: vec![],
                     return_type: None,
                 }
@@ -444,12 +472,10 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::TypeVar(_) => {
-                let display_str = format!("{}", ty.display(db));
-                TypeDescriptor::TypeVar {
-                    display: Some(display_str.clone()),
-                    name: display_str,
-                }
+            Type::TypeVar(bound_tv) => {
+                let display = self.display_string(ty, db);
+                let name = bound_tv.name(db).to_string();
+                TypeDescriptor::TypeVar { display, name }
             }
 
             Type::TypeAlias(_) => {

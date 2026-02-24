@@ -509,13 +509,14 @@ impl<'db> TypeRegistry<'db> {
                 let name = bound_tv.name(db).to_string();
                 let typevar = bound_tv.typevar(db);
 
-                let variance = Some(match bound_tv.variance(db) {
-                    TypeVarVariance::Covariant => "covariant",
-                    TypeVarVariance::Contravariant => "contravariant",
-                    TypeVarVariance::Invariant => "invariant",
-                    TypeVarVariance::Bivariant => "bivariant",
-                }
-                .to_string());
+                let variance = Some(
+                    match bound_tv.variance(db) {
+                        TypeVarVariance::Covariant => "covariant",
+                        TypeVarVariance::Contravariant => "contravariant",
+                        TypeVarVariance::Invariant | TypeVarVariance::Bivariant => "invariant",
+                    }
+                    .to_string(),
+                );
 
                 let upper_bound = typevar
                     .upper_bound(db)
@@ -523,11 +524,7 @@ impl<'db> TypeRegistry<'db> {
 
                 let constraints: Vec<_> = typevar
                     .constraints(db)
-                    .map(|cs| {
-                        cs.iter()
-                            .map(|&c| self.register_component(c, db))
-                            .collect()
-                    })
+                    .map(|cs| cs.iter().map(|&c| self.register_component(c, db)).collect())
                     .unwrap_or_default();
 
                 TypeDescriptor::TypeVar {

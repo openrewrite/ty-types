@@ -718,7 +718,7 @@ fn test_typevar_variance_on_pep695() {
     );
     let variance = tv["variance"].as_str().unwrap();
     assert!(
-        ["covariant", "contravariant", "invariant", "bivariant"].contains(&variance),
+        ["covariant", "contravariant", "invariant"].contains(&variance),
         "variance should be a valid value, got {:?}",
         variance
     );

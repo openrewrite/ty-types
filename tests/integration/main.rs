@@ -662,3 +662,198 @@ fn test_module_names() {
         instance_type.get("moduleName")
     );
 }
+
+#[test]
+fn test_typevar_variance_covariant() {
+    let dir = create_test_project(&[(
+        "v.py",
+        "from typing import TypeVar\nT_co = TypeVar('T_co', covariant=True)\nclass Box[T_co]: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("v.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find a TypeVar — any T_co should have a variance field
+    let tv = types
+        .values()
+        .find(|t| t["kind"] == "typeVar" && t["name"] == "T_co");
+    if let Some(tv) = tv {
+        assert!(
+            tv.get("variance").is_some(),
+            "typeVar should have a variance field, got {:?}",
+            tv
+        );
+    }
+}
+
+#[test]
+fn test_typevar_variance_on_pep695() {
+    let dir = create_test_project(&[("vp.py", "def identity[T](x: T) -> T: return x\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("vp.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let tv = types
+        .values()
+        .find(|t| t["kind"] == "typeVar" && t["name"] == "T")
+        .expect("should have a TypeVar T");
+
+    // PEP 695 typevars should have an inferred variance
+    assert!(
+        tv.get("variance").is_some(),
+        "PEP 695 typeVar should have variance, got {:?}",
+        tv
+    );
+    let variance = tv["variance"].as_str().unwrap();
+    assert!(
+        ["covariant", "contravariant", "invariant"].contains(&variance),
+        "variance should be a valid value, got {:?}",
+        variance
+    );
+}
+
+#[test]
+fn test_typevar_with_upper_bound() {
+    let dir = create_test_project(&[(
+        "b.py",
+        "from typing import TypeVar\nT = TypeVar('T', bound=int)\ndef f(x: T) -> T: return x\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("b.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the TypeVar T used as a type parameter of function f
+    let func_type = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "f")
+        .expect("should have function f");
+    let type_params = func_type["typeParameters"]
+        .as_array()
+        .expect("should have typeParameters");
+    assert_eq!(type_params.len(), 1);
+
+    let tv_id = type_params[0].to_string();
+    let tv = &types[&tv_id];
+    assert_eq!(tv["kind"], "typeVar");
+    assert_eq!(tv["name"], "T");
+
+    // Should have an upperBound pointing to int
+    assert!(
+        tv.get("upperBound").is_some(),
+        "bounded TypeVar should have upperBound, got {:?}",
+        tv
+    );
+    let bound_id = tv["upperBound"].to_string();
+    let bound_type = &types[&bound_id];
+    assert_eq!(
+        bound_type["className"], "int",
+        "upper bound should be int, got {:?}",
+        bound_type
+    );
+}
+
+#[test]
+fn test_typevar_with_constraints() {
+    let dir = create_test_project(&[(
+        "c.py",
+        "from typing import TypeVar\nT = TypeVar('T', int, str)\ndef f(x: T) -> T: return x\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("c.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Find the TypeVar T used as a type parameter of function f
+    let func_type = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "f")
+        .expect("should have function f");
+    let type_params = func_type["typeParameters"]
+        .as_array()
+        .expect("should have typeParameters");
+    assert_eq!(type_params.len(), 1);
+
+    let tv_id = type_params[0].to_string();
+    let tv = &types[&tv_id];
+    assert_eq!(tv["kind"], "typeVar");
+    assert_eq!(tv["name"], "T");
+
+    // Should have constraints with two entries (int and str)
+    let constraints = tv["constraints"]
+        .as_array()
+        .expect("constrained TypeVar should have constraints array");
+    assert_eq!(
+        constraints.len(),
+        2,
+        "TypeVar(T, int, str) should have 2 constraints, got {:?}",
+        constraints
+    );
+
+    // Verify the constraint types are int and str
+    let constraint_names: Vec<&str> = constraints
+        .iter()
+        .filter_map(|c| {
+            let cid = c.to_string();
+            types[&cid]["className"].as_str()
+        })
+        .collect();
+    assert!(
+        constraint_names.contains(&"int") && constraint_names.contains(&"str"),
+        "constraints should include int and str, got {:?}",
+        constraint_names
+    );
+}
+
+#[test]
+fn test_typevar_no_bounds_no_constraints() {
+    let dir = create_test_project(&[("nb.py", "def identity[T](x: T) -> T: return x\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("nb.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let tv = types
+        .values()
+        .find(|t| t["kind"] == "typeVar" && t["name"] == "T")
+        .expect("should have TypeVar T");
+
+    // Unbounded TypeVar should not have upperBound or constraints keys
+    assert!(
+        tv.get("upperBound").is_none(),
+        "unbounded TypeVar should not have upperBound, got {:?}",
+        tv
+    );
+    assert!(
+        tv.get("constraints").is_none(),
+        "unconstrained TypeVar should not have constraints key, got {:?}",
+        tv
+    );
+}

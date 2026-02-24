@@ -3,6 +3,7 @@ use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::{
     ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
+    TypeVarVariance,
 };
 
 use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
@@ -506,7 +507,36 @@ impl<'db> TypeRegistry<'db> {
             Type::TypeVar(bound_tv) => {
                 let display = self.display_string(ty, db);
                 let name = bound_tv.name(db).to_string();
-                TypeDescriptor::TypeVar { display, name }
+                let typevar = bound_tv.typevar(db);
+
+                let variance = Some(match bound_tv.variance(db) {
+                    TypeVarVariance::Covariant => "covariant",
+                    TypeVarVariance::Contravariant => "contravariant",
+                    TypeVarVariance::Invariant => "invariant",
+                    TypeVarVariance::Bivariant => "bivariant",
+                }
+                .to_string());
+
+                let upper_bound = typevar
+                    .upper_bound(db)
+                    .map(|bound| self.register_component(bound, db));
+
+                let constraints: Vec<_> = typevar
+                    .constraints(db)
+                    .map(|cs| {
+                        cs.iter()
+                            .map(|&c| self.register_component(c, db))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                TypeDescriptor::TypeVar {
+                    display,
+                    name,
+                    variance,
+                    upper_bound,
+                    constraints,
+                }
             }
 
             Type::TypeAlias(_) => {

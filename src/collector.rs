@@ -106,7 +106,13 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             .bindings(db)
             .match_parameters(db, &call_arguments);
         let constraints = ConstraintSetBuilder::new();
-        let _ = bindings.check_types_impl(db, &constraints, &call_arguments, TypeContext::default(), &[]);
+        let _ = bindings.check_types_impl(
+            db,
+            &constraints,
+            &call_arguments,
+            TypeContext::default(),
+            &[],
+        );
 
         // Pick the first matching overload (fallback to first overload)
         let binding = bindings.iter_flat().flatten().next()?;

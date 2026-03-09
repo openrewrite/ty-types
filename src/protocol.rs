@@ -342,7 +342,9 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         typevar_kind: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        bound: Option<TypeId>,
+        variance: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upper_bound: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         constraints: Vec<TypeId>,
         #[serde(skip_serializing_if = "Option::is_none")]

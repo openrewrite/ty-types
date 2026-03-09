@@ -4,7 +4,7 @@ use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::Signature;
 use ty_python_semantic::types::{
     ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
-    TypeVarBoundOrConstraints, TypeVarKind,
+    TypeVarKind, TypeVarVariance,
 };
 
 use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
@@ -559,21 +559,24 @@ impl<'db> TypeRegistry<'db> {
                 let typevar_kind = Some(Self::typevar_kind_str(kind).to_string());
 
                 let typevar = bound_tv.typevar(db);
-                let (bound, constraints) =
-                    match typevar.bound_or_constraints(db) {
-                        Some(TypeVarBoundOrConstraints::UpperBound(bound_ty)) => {
-                            (Some(self.register_component(bound_ty, db)), vec![])
-                        }
-                        Some(TypeVarBoundOrConstraints::Constraints(constraint_set)) => {
-                            let ids = constraint_set
-                                .elements(db)
-                                .iter()
-                                .map(|&t| self.register_component(t, db))
-                                .collect();
-                            (None, ids)
-                        }
-                        None => (None, vec![]),
-                    };
+
+                let variance = Some(
+                    match bound_tv.variance(db) {
+                        TypeVarVariance::Covariant => "covariant",
+                        TypeVarVariance::Contravariant => "contravariant",
+                        TypeVarVariance::Invariant | TypeVarVariance::Bivariant => "invariant",
+                    }
+                    .to_string(),
+                );
+
+                let upper_bound = typevar
+                    .upper_bound(db)
+                    .map(|bound| self.register_component(bound, db));
+
+                let constraints: Vec<_> = typevar
+                    .constraints(db)
+                    .map(|cs| cs.iter().map(|&c| self.register_component(c, db)).collect())
+                    .unwrap_or_default();
 
                 let default_type = typevar
                     .default_type(db)
@@ -583,7 +586,8 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     name,
                     typevar_kind,
-                    bound,
+                    variance,
+                    upper_bound,
                     constraints,
                     default_type,
                 }
@@ -701,9 +705,7 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::DataclassDecorator(_)
-            | Type::DataclassTransformer(_)
-            | Type::BoundSuper(_) => {
+            Type::DataclassDecorator(_) | Type::DataclassTransformer(_) | Type::BoundSuper(_) => {
                 let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }
             }

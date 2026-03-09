@@ -232,6 +232,10 @@ pub enum TypeDescriptor {
     Callable {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        parameters: Vec<ParameterInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_type: Option<TypeId>,
     },
 
     #[serde(rename_all = "camelCase")]
@@ -241,9 +245,22 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        class_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
+        parameters: Vec<ParameterInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_type: Option<TypeId>,
+    },
+
+    #[serde(rename_all = "camelCase")]
+    WrapperDescriptor {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        descriptor_kind: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         parameters: Vec<ParameterInfo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         return_type: Option<TypeId>,
@@ -321,6 +338,15 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        /// "TypeVar", "ParamSpec", "TypeVarTuple", "Self"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        typevar_kind: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bound: Option<TypeId>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        constraints: Vec<TypeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default_type: Option<TypeId>,
     },
 
     #[serde(rename_all = "camelCase")]
@@ -335,6 +361,17 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        value_type: Option<TypeId>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        type_parameters: Vec<TypeId>,
+    },
+
+    #[serde(rename_all = "camelCase")]
+    KnownInstance {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        class_name: String,
     },
 
     #[serde(rename_all = "camelCase")]
@@ -400,6 +437,7 @@ impl TypeDescriptor {
             | Self::Function { display, .. }
             | Self::Callable { display, .. }
             | Self::BoundMethod { display, .. }
+            | Self::WrapperDescriptor { display, .. }
             | Self::IntLiteral { display, .. }
             | Self::BoolLiteral { display, .. }
             | Self::StringLiteral { display, .. }
@@ -413,6 +451,7 @@ impl TypeDescriptor {
             | Self::TypeVar { display, .. }
             | Self::Module { display, .. }
             | Self::TypeAlias { display, .. }
+            | Self::KnownInstance { display, .. }
             | Self::TypedDict { display, .. }
             | Self::TypeIs { display, .. }
             | Self::TypeGuard { display, .. }

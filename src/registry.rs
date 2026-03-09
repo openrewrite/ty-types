@@ -1,8 +1,10 @@
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
+use ty_python_semantic::types::signatures::Signature;
 use ty_python_semantic::types::{
     ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
+    TypeVarBoundOrConstraints, TypeVarKind,
 };
 
 use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
@@ -137,23 +139,11 @@ impl<'db> TypeRegistry<'db> {
         }
     }
 
-    fn build_function_params(
+    fn build_params_from_signature(
         &mut self,
-        func_ty: Type<'db>,
+        sig: &Signature<'db>,
         db: &'db dyn Db,
     ) -> (Vec<TypeId>, Vec<ParameterInfo>, Option<TypeId>) {
-        let func = match func_ty.as_function_literal() {
-            Some(f) => f,
-            None => return (vec![], vec![], None),
-        };
-        let callable_sig = func.signature(db);
-        // TODO: only the first overload is used; overloaded functions lose
-        // all but the first signature. Consider representing overloads.
-        let sig = match callable_sig.iter().next() {
-            Some(s) => s,
-            None => return (vec![], vec![], None),
-        };
-
         let type_parameters = self.build_type_parameters(sig.generic_context, db);
 
         let parameters: Vec<ParameterInfo> = sig
@@ -206,6 +196,32 @@ impl<'db> TypeRegistry<'db> {
         };
 
         (type_parameters, parameters, return_type)
+    }
+
+    fn build_function_params(
+        &mut self,
+        func_ty: Type<'db>,
+        db: &'db dyn Db,
+    ) -> (Vec<TypeId>, Vec<ParameterInfo>, Option<TypeId>) {
+        let func = match func_ty.as_function_literal() {
+            Some(f) => f,
+            None => return (vec![], vec![], None),
+        };
+        let callable_sig = func.signature(db);
+        let sig = match callable_sig.iter().next() {
+            Some(s) => s,
+            None => return (vec![], vec![], None),
+        };
+        self.build_params_from_signature(sig, db)
+    }
+
+    fn typevar_kind_str(kind: TypeVarKind) -> &'static str {
+        match kind {
+            TypeVarKind::Legacy | TypeVarKind::Pep695 => "TypeVar",
+            TypeVarKind::TypingSelf => "Self",
+            TypeVarKind::ParamSpec | TypeVarKind::Pep695ParamSpec => "ParamSpec",
+            TypeVarKind::Pep613Alias => "TypeAlias",
+        }
     }
 
     fn build_descriptor(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeDescriptor {
@@ -459,9 +475,24 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::Callable(_) => {
+            Type::Callable(callable_ty) => {
                 let display = self.display_string(ty, db);
-                TypeDescriptor::Callable { display }
+                let sigs = callable_ty.signatures(db);
+                if let Some(sig) = sigs.iter().next() {
+                    let (_type_params, parameters, return_type) =
+                        self.build_params_from_signature(sig, db);
+                    TypeDescriptor::Callable {
+                        display,
+                        parameters,
+                        return_type,
+                    }
+                } else {
+                    TypeDescriptor::Callable {
+                        display,
+                        parameters: vec![],
+                        return_type: None,
+                    }
+                }
             }
 
             Type::BoundMethod(bound) => {
@@ -469,12 +500,23 @@ impl<'db> TypeRegistry<'db> {
                 let func = bound.function(db);
                 let func_ty = Type::FunctionLiteral(func);
                 let name = Some(func.name(db).to_string());
+                // Derive class name from the self_instance type
+                let class_name = match bound.self_instance(db) {
+                    Type::NominalInstance(inst) => {
+                        Some(inst.class_literal(db).name(db).to_string())
+                    }
+                    Type::ProtocolInstance(inst) => inst
+                        .to_nominal_instance()
+                        .map(|n| n.class_literal(db).name(db).to_string()),
+                    _ => None,
+                };
                 let module_name = self.resolve_module_name(db, func.file(db));
                 let (type_parameters, parameters, return_type) =
                     self.build_function_params(func_ty, db);
                 TypeDescriptor::BoundMethod {
                     display,
                     name,
+                    class_name,
                     module_name,
                     type_parameters,
                     parameters,
@@ -482,15 +524,22 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::KnownBoundMethod(_) => {
+            Type::KnownBoundMethod(known_bound) => {
                 let display = self.display_string(ty, db);
+                let class_name = Some(known_bound.class().name(db).to_string());
+                let sigs: Vec<_> = known_bound.signatures(db).collect();
+                let (type_parameters, parameters, return_type) = sigs
+                    .first()
+                    .map(|sig| self.build_params_from_signature(sig, db))
+                    .unwrap_or((vec![], vec![], None));
                 TypeDescriptor::BoundMethod {
                     display,
                     name: None,
+                    class_name,
                     module_name: None,
-                    type_parameters: vec![],
-                    parameters: vec![],
-                    return_type: None,
+                    type_parameters,
+                    parameters,
+                    return_type,
                 }
             }
 
@@ -506,14 +555,56 @@ impl<'db> TypeRegistry<'db> {
             Type::TypeVar(bound_tv) => {
                 let display = self.display_string(ty, db);
                 let name = bound_tv.name(db).to_string();
-                TypeDescriptor::TypeVar { display, name }
+                let kind = bound_tv.kind(db);
+                let typevar_kind = Some(Self::typevar_kind_str(kind).to_string());
+
+                let typevar = bound_tv.typevar(db);
+                let (bound, constraints) =
+                    match typevar.bound_or_constraints(db) {
+                        Some(TypeVarBoundOrConstraints::UpperBound(bound_ty)) => {
+                            (Some(self.register_component(bound_ty, db)), vec![])
+                        }
+                        Some(TypeVarBoundOrConstraints::Constraints(constraint_set)) => {
+                            let ids = constraint_set
+                                .elements(db)
+                                .iter()
+                                .map(|&t| self.register_component(t, db))
+                                .collect();
+                            (None, ids)
+                        }
+                        None => (None, vec![]),
+                    };
+
+                let default_type = typevar
+                    .default_type(db)
+                    .map(|dt| self.register_component(dt, db));
+
+                TypeDescriptor::TypeVar {
+                    display,
+                    name,
+                    typevar_kind,
+                    bound,
+                    constraints,
+                    default_type,
+                }
             }
 
-            Type::TypeAlias(_) => {
-                let display_str = format!("{}", ty.display(db));
+            Type::TypeAlias(type_alias) => {
+                let display = self.display_string(ty, db);
+                let name = type_alias.name(db).to_string();
+                let value_ty = type_alias.value_type(db);
+                let value_type = if matches!(value_ty, Type::Dynamic(_)) {
+                    None
+                } else {
+                    Some(self.register_component(value_ty, db))
+                };
+                let type_parameters =
+                    self.build_type_parameters(type_alias.generic_context(db), db);
                 TypeDescriptor::TypeAlias {
-                    display: Some(display_str.clone()),
-                    name: display_str,
+                    display,
+                    name,
+                    value_type,
+                    type_parameters,
                 }
             }
 
@@ -585,13 +676,32 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::Property { display }
             }
 
-            Type::KnownInstance(_) => {
+            Type::KnownInstance(ki) => {
                 let display = self.display_string(ty, db);
-                TypeDescriptor::Other { display }
+                let class_name = ki.class(db).name(db).to_string();
+                TypeDescriptor::KnownInstance {
+                    display,
+                    class_name,
+                }
             }
 
-            Type::WrapperDescriptor(_)
-            | Type::DataclassDecorator(_)
+            Type::WrapperDescriptor(wrapper_kind) => {
+                let display = self.display_string(ty, db);
+                let descriptor_kind = format!("{wrapper_kind:?}");
+                let sigs: Vec<_> = wrapper_kind.signatures(db).collect();
+                let (_type_params, parameters, return_type) = sigs
+                    .first()
+                    .map(|sig| self.build_params_from_signature(sig, db))
+                    .unwrap_or((vec![], vec![], None));
+                TypeDescriptor::WrapperDescriptor {
+                    display,
+                    descriptor_kind,
+                    parameters,
+                    return_type,
+                }
+            }
+
+            Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
             | Type::BoundSuper(_) => {
                 let display = self.display_string(ty, db);

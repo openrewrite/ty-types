@@ -6,6 +6,7 @@ use ruff_python_ast::{
 };
 use ruff_text_size::Ranged;
 use ty_python_semantic::types::call::CallArguments;
+use ty_python_semantic::types::constraints::ConstraintSetBuilder;
 use ty_python_semantic::types::{ParameterKind, Type, TypeContext};
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
@@ -104,7 +105,8 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         let mut bindings = callable_type
             .bindings(db)
             .match_parameters(db, &call_arguments);
-        let _ = bindings.check_types_impl(db, &call_arguments, TypeContext::default(), &[]);
+        let constraints = ConstraintSetBuilder::new();
+        let _ = bindings.check_types_impl(db, &constraints, &call_arguments, TypeContext::default(), &[]);
 
         // Pick the first matching overload (fallback to first overload)
         let binding = bindings.iter_flat().flatten().next()?;

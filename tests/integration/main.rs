@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod protocol;
 
 use std::io::{BufRead, BufReader, Write};

@@ -1003,7 +1003,8 @@ fn test_concatenate_signature() {
 #[test]
 fn test_non_paramspec_signature_has_no_flags() {
     // A plain signature should not emit concatenatePrefix or paramSpecName on any parameter.
-    let dir = create_test_project(&[("plain.py", "def add(a: int, b: int) -> int: return a + b\n")]);
+    let dir =
+        create_test_project(&[("plain.py", "def add(a: int, b: int) -> int: return a + b\n")]);
 
     let responses = run_session(&[
         &initialize_request(dir.path().to_str().unwrap(), 1),

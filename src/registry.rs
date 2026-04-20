@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
-use ty_python_semantic::types::signatures::Signature;
+use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
 use ty_python_semantic::types::{
     ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
     TypeVarKind, TypeVarVariance,
@@ -124,19 +124,10 @@ impl<'db> TypeRegistry<'db> {
         cl: ClassLiteral<'db>,
         db: &'db dyn Db,
     ) -> Vec<TypeId> {
-        match cl {
-            ClassLiteral::Static(static_class) => static_class
-                .explicit_bases(db)
-                .iter()
-                .map(|&base| self.register_component(base, db))
-                .collect(),
-            ClassLiteral::Dynamic(dynamic_class) => dynamic_class
-                .explicit_bases(db)
-                .iter()
-                .map(|&base| self.register_component(base, db))
-                .collect(),
-            ClassLiteral::DynamicNamedTuple(_) => vec![],
-        }
+        cl.explicit_bases(db)
+            .iter()
+            .map(|&base| self.register_component(base, db))
+            .collect()
     }
 
     fn build_params_from_signature(
@@ -145,6 +136,15 @@ impl<'db> TypeRegistry<'db> {
         db: &'db dyn Db,
     ) -> (Vec<TypeId>, Vec<ParameterInfo>, Option<TypeId>) {
         let type_parameters = self.build_type_parameters(sig.generic_context, db);
+
+        let (in_concatenate, param_spec_name) = match sig.parameters().kind() {
+            ParametersKind::ParamSpec(tv) => (false, Some(tv.name(db).to_string())),
+            ParametersKind::Concatenate(ConcatenateTail::ParamSpec(tv)) => {
+                (true, Some(tv.name(db).to_string()))
+            }
+            ParametersKind::Concatenate(ConcatenateTail::Gradual) => (true, None),
+            _ => (false, None),
+        };
 
         let parameters: Vec<ParameterInfo> = sig
             .parameters()
@@ -178,12 +178,21 @@ impl<'db> TypeRegistry<'db> {
                 let default_type_id = param
                     .default_type()
                     .map(|dt| self.register_component(dt, db));
+                let is_variadic = param.is_variadic() || param.is_keyword_variadic();
+                let concatenate_prefix = in_concatenate && !is_variadic;
+                let this_param_spec_name = if is_variadic {
+                    param_spec_name.clone()
+                } else {
+                    None
+                };
                 ParameterInfo {
                     name,
                     type_id,
                     kind,
                     has_default,
                     default_type_id,
+                    concatenate_prefix,
+                    param_spec_name: this_param_spec_name,
                 }
             })
             .collect();
@@ -613,6 +622,10 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::TypedDict(typed_dict) => {
+                // TODO: emit `extra_items` once ty exposes it on `TypedDictType`.
+                // Inference-side parsing landed in astral-sh/ruff#24362, but the public
+                // accessor on the type is still a TODO inside
+                // ruff/crates/ty_python_semantic/src/types/typed_dict.rs.
                 let display = self.display_string(ty, db);
                 let name = typed_dict
                     .defining_class()
@@ -705,7 +718,10 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::DataclassDecorator(_) | Type::DataclassTransformer(_) | Type::BoundSuper(_) => {
+            Type::DataclassDecorator(_)
+            | Type::DataclassTransformer(_)
+            | Type::BoundSuper(_)
+            | Type::Divergent(_) => {
                 let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }
             }

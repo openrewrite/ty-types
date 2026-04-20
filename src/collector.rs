@@ -7,6 +7,7 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use ty_python_semantic::types::call::CallArguments;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
+use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
 use ty_python_semantic::types::{ParameterKind, Type, TypeContext};
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
@@ -123,6 +124,15 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         let return_type_id = Some(self.register_type(binding.return_type()));
 
         // Extract parameters from the binding's signature
+        let (in_concatenate, param_spec_name) = match binding.signature.parameters().kind() {
+            ParametersKind::ParamSpec(tv) => (false, Some(tv.name(db).to_string())),
+            ParametersKind::Concatenate(ConcatenateTail::ParamSpec(tv)) => {
+                (true, Some(tv.name(db).to_string()))
+            }
+            ParametersKind::Concatenate(ConcatenateTail::Gradual) => (true, None),
+            _ => (false, None),
+        };
+
         let parameters: Vec<ParameterInfo> = binding
             .signature
             .parameters()
@@ -150,6 +160,14 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
                 let default_type_id = param.default_type().map(|dt| self.register_type(dt));
 
+                let is_variadic = param.is_variadic() || param.is_keyword_variadic();
+                let concatenate_prefix = in_concatenate && !is_variadic;
+                let this_param_spec_name = if is_variadic {
+                    param_spec_name.clone()
+                } else {
+                    None
+                };
+
                 ParameterInfo {
                     name: param
                         .display_name()
@@ -159,6 +177,8 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
                     kind,
                     has_default,
                     default_type_id,
+                    concatenate_prefix,
+                    param_spec_name: this_param_spec_name,
                 }
             })
             .collect();

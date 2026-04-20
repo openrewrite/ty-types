@@ -858,3 +858,176 @@ fn test_typevar_no_bounds_no_constraints() {
         tv
     );
 }
+
+#[test]
+fn test_param_spec_signature() {
+    // A callable typed `Callable[P, R]` — the signature's *args/**kwargs
+    // stand in for the ParamSpec tail.
+    let dir = create_test_project(&[(
+        "ps.py",
+        "from typing import Callable, ParamSpec, TypeVar\n\
+         P = ParamSpec(\"P\")\n\
+         R = TypeVar(\"R\")\n\
+         def run(cb: Callable[P, R]) -> R: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("ps.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let run_fn = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "run")
+        .expect("should have function 'run'");
+    let cb_param = run_fn["parameters"]
+        .as_array()
+        .expect("parameters array")
+        .iter()
+        .find(|p| p["name"] == "cb")
+        .expect("should have 'cb' parameter");
+    let cb_type_id = cb_param["typeId"].as_u64().expect("cb typeId") as u32;
+    let cb_type = types
+        .get(&cb_type_id.to_string())
+        .expect("cb type descriptor");
+    assert_eq!(cb_type["kind"], "callable");
+
+    let params = cb_type["parameters"]
+        .as_array()
+        .expect("callable parameters array");
+
+    let ps_params: Vec<&serde_json::Value> = params
+        .iter()
+        .filter(|p| p.get("paramSpecName").is_some())
+        .collect();
+    assert_eq!(
+        ps_params.len(),
+        2,
+        "expected 2 ParamSpec-backed params (*args, **kwargs), got {:?}",
+        params
+    );
+    for p in &ps_params {
+        assert_eq!(p["paramSpecName"], "P");
+        assert!(
+            p.get("concatenatePrefix").is_none(),
+            "pure ParamSpec signature should not mark params as concatenatePrefix, got {:?}",
+            p
+        );
+    }
+
+    assert!(
+        !params
+            .iter()
+            .any(|p| p.get("concatenatePrefix") == Some(&serde_json::Value::Bool(true))),
+        "pure ParamSpec signature should not have any concatenatePrefix params, got {:?}",
+        params
+    );
+}
+
+#[test]
+fn test_concatenate_signature() {
+    // `Callable[Concatenate[int, P], R]` — leading positional params should be
+    // marked as concatenatePrefix, and the synthesized *args/**kwargs should
+    // carry the ParamSpec name.
+    let dir = create_test_project(&[(
+        "cc.py",
+        "from typing import Callable, Concatenate, ParamSpec, TypeVar\n\
+         P = ParamSpec(\"P\")\n\
+         R = TypeVar(\"R\")\n\
+         def run(cb: Callable[Concatenate[int, P], R]) -> R: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("cc.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let run_fn = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "run")
+        .expect("should have function 'run'");
+    let cb_param = run_fn["parameters"]
+        .as_array()
+        .expect("parameters array")
+        .iter()
+        .find(|p| p["name"] == "cb")
+        .expect("should have 'cb' parameter");
+    let cb_type_id = cb_param["typeId"].as_u64().expect("cb typeId") as u32;
+    let cb_type = types
+        .get(&cb_type_id.to_string())
+        .expect("cb type descriptor");
+    assert_eq!(cb_type["kind"], "callable");
+
+    let params = cb_type["parameters"]
+        .as_array()
+        .expect("callable parameters array");
+
+    let prefix_params: Vec<&serde_json::Value> = params
+        .iter()
+        .filter(|p| p.get("concatenatePrefix") == Some(&serde_json::Value::Bool(true)))
+        .collect();
+    assert_eq!(
+        prefix_params.len(),
+        1,
+        "expected 1 concatenate prefix param, got {:?}",
+        params
+    );
+
+    let ps_params: Vec<&serde_json::Value> = params
+        .iter()
+        .filter(|p| p.get("paramSpecName") == Some(&serde_json::json!("P")))
+        .collect();
+    assert_eq!(
+        ps_params.len(),
+        2,
+        "expected 2 ParamSpec-backed params (*args, **kwargs), got {:?}",
+        params
+    );
+    for p in &ps_params {
+        assert!(
+            p.get("concatenatePrefix").is_none(),
+            "variadic ParamSpec params should not be marked as concatenatePrefix, got {:?}",
+            p
+        );
+    }
+}
+
+#[test]
+fn test_non_paramspec_signature_has_no_flags() {
+    // A plain signature should not emit concatenatePrefix or paramSpecName on any parameter.
+    let dir = create_test_project(&[("plain.py", "def add(a: int, b: int) -> int: return a + b\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("plain.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let add_fn = types
+        .values()
+        .find(|t| t["kind"] == "function" && t["name"] == "add")
+        .expect("should have function 'add'");
+    for p in add_fn["parameters"].as_array().unwrap() {
+        assert!(
+            p.get("concatenatePrefix").is_none(),
+            "plain signature param should not have concatenatePrefix: {:?}",
+            p
+        );
+        assert!(
+            p.get("paramSpecName").is_none(),
+            "plain signature param should not have paramSpecName: {:?}",
+            p
+        );
+    }
+}

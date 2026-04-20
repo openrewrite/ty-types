@@ -133,6 +133,14 @@ pub struct ParameterInfo {
     pub has_default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_type_id: Option<TypeId>,
+    /// Set on leading positional parameters of a `Concatenate[T1, ..., Tn, P]` or
+    /// `Concatenate[T1, ..., Tn, ...]` signature.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub concatenate_prefix: bool,
+    /// Set on the `*args` / `**kwargs` parameters that stand in for a `ParamSpec` tail,
+    /// carrying the name of that `ParamSpec` (e.g. `"P"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param_spec_name: Option<String>,
 }
 
 // ─── Structured type details ─────────────────────────────────────────

@@ -179,6 +179,8 @@ Attached to `ExprCall` nodes. Contains the resolved signature at the call site, 
 | `kind` | `string` | One of `positionalOnly`, `positionalOrKeyword`, `keywordOnly`, `variadic`, `keywordVariadic` |
 | `hasDefault` | `boolean` | Whether the parameter has a default value |
 | `defaultTypeId` | `integer \| null` | Type of the default value (e.g. `Literal[42]`) |
+| `concatenatePrefix` | `boolean` | `true` on the leading positional parameters of a `Concatenate[T1, ..., Tn, P]` or `Concatenate[T1, ..., Tn, ...]` signature *(omitted when false)* |
+| `paramSpecName` | `string` | Set on the `*args` / `**kwargs` entries that stand in for a `ParamSpec` tail, carrying that `ParamSpec`'s name (e.g. `"P"`) *(omitted when absent)* |
 
 ### TypeDescriptor
 

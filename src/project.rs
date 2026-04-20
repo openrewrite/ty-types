@@ -16,5 +16,5 @@ pub fn create_database(project_root: &str) -> anyhow::Result<ProjectDatabase> {
         .apply_configuration_files(&system)
         .context("Failed to apply configuration files")?;
 
-    ProjectDatabase::new(metadata, system).context("Failed to create project database")
+    ProjectDatabase::fallible(metadata, system).context("Failed to create project database")
 }

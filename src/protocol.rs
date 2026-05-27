@@ -428,6 +428,21 @@ pub enum TypeDescriptor {
         display: Option<String>,
     },
 
+    /// An enum instance with one or more canonical members excluded
+    /// (e.g. `Color & ~Literal[Color.RED]`).
+    #[serde(rename_all = "camelCase")]
+    EnumComplement {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        class_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
+        class_id: TypeId,
+        excluded_names: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        rest: Vec<TypeId>,
+    },
+
     // Fallback for internal ty types
     Other {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -468,6 +483,7 @@ impl TypeDescriptor {
             | Self::NewType { display, .. }
             | Self::SpecialForm { display, .. }
             | Self::Property { display, .. }
+            | Self::EnumComplement { display, .. }
             | Self::Other { display, .. } => {
                 *display = None;
             }

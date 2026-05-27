@@ -72,6 +72,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `newType` | NewType wrapper | `name`, `baseType` |
 | `specialForm` | Typing special form | `name` |
 | `property` | Property descriptor | — |
+| `enumComplement` | Enum instance with one or more canonical members excluded (e.g. `Color & ~Literal[Color.RED]`) | `className`, `moduleName`, `classId`, `excludedNames`, `rest` |
 | `other` | Fallback for unhandled types | — |
 
 All variants include an optional `display` field with ty's string representation.

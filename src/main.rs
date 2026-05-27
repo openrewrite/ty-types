@@ -146,11 +146,7 @@ fn run_serve() {
     let mut lines = stdin.lock().lines();
 
     // Outer loop: wait for initialize, then enter session
-    loop {
-        let Some(line) = read_line(&mut lines) else {
-            break;
-        };
-
+    while let Some(line) = read_line(&mut lines) {
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {

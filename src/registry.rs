@@ -3,8 +3,8 @@ use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
 use ty_python_semantic::types::{
-    ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeGuardLike,
-    TypeVarKind, TypeVarVariance,
+    ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeVarKind,
+    TypeVarVariance,
 };
 
 use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
@@ -715,6 +715,32 @@ impl<'db> TypeRegistry<'db> {
                     descriptor_kind,
                     parameters,
                     return_type,
+                }
+            }
+
+            Type::EnumComplement(complement) => {
+                let display = self.display_string(ty, db);
+                let enum_class = complement.enum_class(db);
+                let class_name = enum_class.name(db).to_string();
+                let module_name = self.resolve_module_name(db, enum_class.file(db));
+                let class_id = self.register_component(Type::ClassLiteral(enum_class), db);
+                let excluded_names = complement
+                    .excluded_names(db)
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect();
+                let rest = complement
+                    .rest(db)
+                    .iter()
+                    .map(|&t| self.register_component(t, db))
+                    .collect();
+                TypeDescriptor::EnumComplement {
+                    display,
+                    class_name,
+                    module_name,
+                    class_id,
+                    excluded_names,
+                    rest,
                 }
             }
 

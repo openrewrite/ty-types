@@ -48,6 +48,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`) | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint | `base` |
+| `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |
 | `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `typeParameters`, `parameters`, `returnType` |

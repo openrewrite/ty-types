@@ -206,6 +206,14 @@ pub enum TypeDescriptor {
         base: TypeId,
     },
 
+    // TypeForm[T] — PEP 747 type-form value wrapping a type expression
+    #[serde(rename_all = "camelCase")]
+    TypeForm {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        type_argument: TypeId,
+    },
+
     // Composite types
     Union {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,6 +465,7 @@ impl TypeDescriptor {
             Self::Instance { display, .. }
             | Self::ClassLiteral { display, .. }
             | Self::SubclassOf { display, .. }
+            | Self::TypeForm { display, .. }
             | Self::Union { display, .. }
             | Self::Intersection { display, .. }
             | Self::Function { display, .. }

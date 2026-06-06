@@ -31,7 +31,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 
 - The `ruff/` submodule is pinned to a specific commit on `openrewrite/ruff` `ty-types-2` branch, which widens `pub(crate)` → `pub` across `ty_python_semantic`. This gives us access to structured type internals (callable signatures, type var bounds, known instance classes, etc.).
 - Update the submodule with `cd ruff && git fetch origin ty-types-2 && git checkout origin/ty-types-2`.
-- Rust edition 2024, requires Rust 1.93+.
+- Rust edition 2024, requires Rust 1.94+.
 
 ## Wire Protocol
 

@@ -4,7 +4,7 @@ A Rust CLI that exposes [ty](https://github.com/astral-sh/ty)'s Python type infe
 
 ## Building
 
-Requires Rust 1.93+. The `ruff/` submodule must be checked out first:
+Requires Rust 1.94+. The `ruff/` submodule must be checked out first:
 
 ```bash
 git submodule update --init

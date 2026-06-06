@@ -290,6 +290,43 @@ fn test_union_type() {
 }
 
 #[test]
+fn test_type_form() {
+    // PEP 747 `TypeForm[T]` value — exercises the `typeForm` descriptor and its
+    // `typeArgument` cross-reference into the registry.
+    let dir = create_test_project(&[(
+        "tf.py",
+        "from typing_extensions import TypeForm\n\
+         string_form: TypeForm[str] = str\n\
+         reveal_type(string_form)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("tf.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Should have a `TypeForm[str]` type-form descriptor.
+    let type_form = types
+        .values()
+        .find(|t| t["kind"] == "typeForm" && t["display"].as_str() == Some("TypeForm[str]"))
+        .expect("should have a 'TypeForm[str]' typeForm type");
+
+    // Its `typeArgument` should reference the `str` type in the registry.
+    let arg_id = type_form["typeArgument"]
+        .as_u64()
+        .expect("typeForm should have a typeArgument id");
+    let arg = &types[&arg_id.to_string()];
+    assert_eq!(
+        arg["display"], "str",
+        "typeArgument should resolve to 'str'"
+    );
+}
+
+#[test]
 fn test_type_registry() {
     let dir = create_test_project(&[("a.py", "x: int = 42\n"), ("b.py", "y: str = 'hello'\n")]);
 

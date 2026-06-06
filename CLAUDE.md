@@ -31,7 +31,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 
 - The `ruff/` submodule is pinned to a specific commit on `openrewrite/ruff` `ty-types-2` branch, which widens `pub(crate)` → `pub` across `ty_python_semantic`. This gives us access to structured type internals (callable signatures, type var bounds, known instance classes, etc.).
 - Update the submodule with `cd ruff && git fetch origin ty-types-2 && git checkout origin/ty-types-2`.
-- Rust edition 2024, requires Rust 1.93+.
+- Rust edition 2024, requires Rust 1.94+.
 
 ## Wire Protocol
 
@@ -48,6 +48,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`) | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint | `base` |
+| `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |
 | `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `typeParameters`, `parameters`, `returnType` |

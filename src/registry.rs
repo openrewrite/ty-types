@@ -469,6 +469,15 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::SubclassOf { display, base }
             }
 
+            Type::TypeForm(typeform) => {
+                let display = self.display_string(ty, db);
+                let type_argument = self.register_component(typeform.type_argument(db), db);
+                TypeDescriptor::TypeForm {
+                    display,
+                    type_argument,
+                }
+            }
+
             Type::FunctionLiteral(func) => {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();

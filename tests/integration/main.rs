@@ -1274,3 +1274,36 @@ fn test_library_symbol_visibility() {
     assert!(plain_syms.contains(&"Shown"), "Shown kept: {plain_syms:?}");
     assert!(!plain_syms.contains(&"_helper"), "_helper excluded: {plain_syms:?}");
 }
+
+#[test]
+fn test_library_boundary_classref() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/core.py", "class Widget:\n    size: int = 1\n\ndef make() -> Widget:\n    return Widget()\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // The in-package class is a full classLiteral with members.
+    let widget = types.values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Widget")
+        .expect("Widget should be a full classLiteral");
+    assert!(widget["members"].as_array().map(|m| !m.is_empty()).unwrap_or(false),
+        "Widget should carry members");
+
+    // `int` (typeshed, outside the package) must appear ONLY as a classRef.
+    let int_full = types.values()
+        .any(|t| t["kind"] == "classLiteral" && t["className"] == "int");
+    assert!(!int_full, "int must not be expanded as a full classLiteral");
+    let int_ref = types.values()
+        .any(|t| t["kind"] == "classRef" && t["className"] == "int");
+    assert!(int_ref, "int should appear as a classRef");
+}

@@ -1,4 +1,4 @@
-use ruff_db::system::SystemPathBuf;
+use ruff_db::system::{SystemPath, SystemPathBuf};
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
@@ -24,11 +24,20 @@ pub struct TypeRegistry<'db> {
     /// Tracks all type IDs registered since the last `start_tracking()` call,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
+    /// When set, class literals whose definition file is not under this root
+    /// are emitted as `classRef` instead of being expanded.
+    boundary_root: Option<SystemPathBuf>,
 }
 
 pub struct RegistrationResult {
     pub type_id: TypeId,
     pub is_new: bool,
+}
+
+fn file_under_root(db: &dyn Db, file: ruff_db::files::File, root: &SystemPath) -> bool {
+    file.path(db)
+        .as_system_path()
+        .is_some_and(|p| p.starts_with(root))
 }
 
 impl<'db> TypeRegistry<'db> {
@@ -38,13 +47,17 @@ impl<'db> TypeRegistry<'db> {
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
             tracked_new_ids: Vec::new(),
+            boundary_root: None,
         }
     }
 
-    /// Construct a registry whose class-literal expansion is bounded to a package
-    /// root. (Boundary behavior is added in Task 7; for now this ignores `_root`.)
-    pub fn with_boundary(_root: SystemPathBuf) -> Self {
-        Self::new()
+    /// Construct a registry that bounds class-literal expansion to `root`:
+    /// classes defined outside `root` are emitted as `classRef`.
+    pub fn with_boundary(root: SystemPathBuf) -> Self {
+        Self {
+            boundary_root: Some(root),
+            ..Self::new()
+        }
     }
 
     /// Register a type and return its ID. If the type was already registered,
@@ -402,6 +415,21 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::ClassLiteral(class_literal) => {
+                let cl_file = class_literal.file(db);
+                let external = self
+                    .boundary_root
+                    .as_ref()
+                    .is_some_and(|root| !file_under_root(db, cl_file, root.as_path()));
+                if external {
+                    let display = self.display_string(ty, db);
+                    let class_name = class_literal.name(db).to_string();
+                    let module_name = self.resolve_module_name(db, cl_file);
+                    return TypeDescriptor::ClassRef {
+                        display,
+                        class_name,
+                        module_name,
+                    };
+                }
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let module_name = self.resolve_module_name(db, class_literal.file(db));
@@ -436,10 +464,25 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::GenericAlias(alias) => {
-                let display = self.display_string(ty, db);
                 let origin = alias.origin(db);
+                let origin_file = origin.file(db);
+                let external = self
+                    .boundary_root
+                    .as_ref()
+                    .is_some_and(|root| !file_under_root(db, origin_file, root.as_path()));
+                if external {
+                    let display = self.display_string(ty, db);
+                    let class_name = origin.name(db).to_string();
+                    let module_name = self.resolve_module_name(db, origin_file);
+                    return TypeDescriptor::ClassRef {
+                        display,
+                        class_name,
+                        module_name,
+                    };
+                }
+                let display = self.display_string(ty, db);
                 let class_name = origin.name(db).to_string();
-                let module_name = self.resolve_module_name(db, origin.file(db));
+                let module_name = self.resolve_module_name(db, origin_file);
                 let supertypes: Vec<TypeId> = origin
                     .explicit_bases(db)
                     .iter()

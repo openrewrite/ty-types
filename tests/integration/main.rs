@@ -1192,3 +1192,85 @@ fn test_library_lists_modules_and_symbols() {
     let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
     assert_eq!(types[&widget_type_id.to_string()]["kind"], "classLiteral");
 }
+
+#[test]
+fn test_library_excludes_private_modules() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/public.py", "class Public: pass\n"),
+        ("mypkg/_private.py", "class Hidden: pass\n"),
+        ("mypkg/_internal/__init__.py", ""),
+        ("mypkg/_internal/secret.py", "class Secret: pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+    let names: Vec<&str> = modules.iter().map(|m| m["name"].as_str().unwrap()).collect();
+
+    assert!(names.contains(&"mypkg.public"), "public module kept: {names:?}");
+    assert!(!names.iter().any(|n| n.contains("_private")), "drop _private.py: {names:?}");
+    assert!(!names.iter().any(|n| n.contains("_internal")), "drop _internal pkg: {names:?}");
+}
+
+#[test]
+fn test_library_prefers_pyi_stub() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/mod.py", "value = 1\n"),
+        ("mypkg/mod.pyi", "value: str\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().unwrap();
+    let m = modules.iter().find(|m| m["name"] == "mypkg.mod").expect("mypkg.mod present");
+    assert_eq!(m["file"], "mod.pyi", "should choose the stub file");
+
+    let value = m["symbols"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "value").expect("value symbol");
+    let type_id = value["typeId"].as_u64().unwrap();
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert_eq!(types[&type_id.to_string()]["display"], "str");
+}
+
+#[test]
+fn test_library_symbol_visibility() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/curated.py", "__all__ = [\"Exported\"]\nclass Exported: pass\nclass Hidden: pass\n"),
+        ("mypkg/plain.py", "class Shown: pass\ndef _helper(): pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+
+    let curated = modules.iter().find(|m| m["name"] == "mypkg.curated").unwrap();
+    let curated_syms: Vec<&str> = curated["symbols"].as_array().unwrap()
+        .iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(curated_syms.contains(&"Exported"), "Exported kept: {curated_syms:?}");
+    assert!(!curated_syms.contains(&"Hidden"), "Hidden excluded by __all__: {curated_syms:?}");
+
+    let plain = modules.iter().find(|m| m["name"] == "mypkg.plain").unwrap();
+    let plain_syms: Vec<&str> = plain["symbols"].as_array().unwrap()
+        .iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(plain_syms.contains(&"Shown"), "Shown kept: {plain_syms:?}");
+    assert!(!plain_syms.contains(&"_helper"), "_helper excluded: {plain_syms:?}");
+}

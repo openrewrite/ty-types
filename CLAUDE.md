@@ -68,7 +68,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `typeVar` | Type variable in scope | `name`, `typevarKind`, `bound`, `constraints`, `defaultType` |
 | `module` | Module literal | `moduleName` |
 | `typeAlias` | Type alias (PEP 695 or legacy) | `name`, `valueType`, `typeParameters` |
-| `typedDict` | TypedDict | `name`, `fields` |
+| `typedDict` | TypedDict | `name`, `fields`, `closed`, `extraItems` |
 | `typeIs` / `typeGuard` | Type narrowing returns | `narrowedType` / `guardedType` |
 | `newType` | NewType wrapper | `name`, `baseType` |
 | `specialForm` | Typing special form | `name` |

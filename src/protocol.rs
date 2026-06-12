@@ -161,6 +161,15 @@ pub struct TypedDictFieldInfo {
     pub read_only: bool,
 }
 
+/// PEP 728 `extra_items=` policy: values of undeclared keys are exposed with this
+/// declared type and mutability. Present only when explicitly declared.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypedDictExtraItemsInfo {
+    pub type_id: TypeId,
+    pub read_only: bool,
+}
+
 // ─── Structured type descriptors ─────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -399,6 +408,13 @@ pub enum TypeDescriptor {
         name: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         fields: Vec<TypedDictFieldInfo>,
+        /// `true` when the TypedDict forbids undeclared keys (`closed=True`,
+        /// or equivalently `extra_items=Never`). Omitted when `false`.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        closed: bool,
+        /// Explicit `extra_items=` policy, when declared. Omitted otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extra_items: Option<TypedDictExtraItemsInfo>,
     },
 
     #[serde(rename_all = "camelCase")]

@@ -7,7 +7,10 @@ use ty_python_semantic::types::{
     TypeVarVariance,
 };
 
-use crate::protocol::{ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictFieldInfo};
+use crate::protocol::{
+    ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictExtraItemsInfo,
+    TypedDictFieldInfo,
+};
 
 /// A session-scoped registry that deduplicates types by identity.
 ///
@@ -631,10 +634,6 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::TypedDict(typed_dict) => {
-                // TODO: emit `extra_items` once ty exposes it on `TypedDictType`.
-                // Inference-side parsing landed in astral-sh/ruff#24362, but the public
-                // accessor on the type is still a TODO inside
-                // ruff/crates/ty_python_semantic/src/types/typed_dict.rs.
                 let display = self.display_string(ty, db);
                 let name = typed_dict
                     .defining_class()
@@ -653,10 +652,24 @@ impl<'db> TypeRegistry<'db> {
                         }
                     })
                     .collect();
+                // PEP 728 openness: `Closed` forbids undeclared keys, `Extra` exposes
+                // them with a declared type and mutability. `ImplicitlyOpen` (the
+                // default) carries neither flag.
+                let openness = typed_dict.openness(db);
+                let closed = openness.is_closed();
+                let extra_items = openness.explicit_extra_items().map(|extra| {
+                    let type_id = self.register_component(extra.declared_ty, db);
+                    TypedDictExtraItemsInfo {
+                        type_id,
+                        read_only: extra.is_read_only(),
+                    }
+                });
                 TypeDescriptor::TypedDict {
                     display,
                     name,
                     fields,
+                    closed,
+                    extra_items,
                 }
             }
 

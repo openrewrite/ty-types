@@ -327,6 +327,85 @@ fn test_type_form() {
 }
 
 #[test]
+fn test_typed_dict_extra_items() {
+    // PEP 728 `extra_items=` — exercises the `typedDict` descriptor's `extraItems`
+    // field and its `typeId` cross-reference into the registry.
+    let dir = create_test_project(&[(
+        "td.py",
+        "from typing_extensions import TypedDict\n\
+         class Movie(TypedDict, extra_items=int):\n\
+         \x20   name: str\n\
+         m: Movie = {\"name\": \"Blade Runner\"}\n\
+         reveal_type(m)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("td.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let movie = types
+        .values()
+        .find(|t| t["kind"] == "typedDict" && t["name"] == "Movie")
+        .expect("should have a 'Movie' typedDict type");
+
+    // Not closed, and exposes extra items of type `int` that are mutable.
+    assert_ne!(
+        movie["closed"],
+        serde_json::json!(true),
+        "Movie is not closed"
+    );
+    let extra = &movie["extraItems"];
+    assert_eq!(extra["readOnly"], false, "extra_items=int is mutable");
+    let type_id = extra["typeId"]
+        .as_u64()
+        .expect("extraItems should carry a typeId");
+    assert_eq!(
+        types[&type_id.to_string()]["display"],
+        "int",
+        "extraItems typeId should resolve to 'int'"
+    );
+}
+
+#[test]
+fn test_typed_dict_closed() {
+    // PEP 728 `closed=True` — the `typedDict` descriptor should report `closed: true`
+    // and carry no `extraItems`.
+    let dir = create_test_project(&[(
+        "tdc.py",
+        "from typing_extensions import TypedDict\n\
+         class Sealed(TypedDict, closed=True):\n\
+         \x20   name: str\n\
+         s: Sealed = {\"name\": \"x\"}\n\
+         reveal_type(s)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("tdc.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let sealed = types
+        .values()
+        .find(|t| t["kind"] == "typedDict" && t["name"] == "Sealed")
+        .expect("should have a 'Sealed' typedDict type");
+
+    assert_eq!(sealed["closed"], true, "Sealed is closed");
+    assert!(
+        sealed["extraItems"].is_null(),
+        "closed TypedDict has no extraItems"
+    );
+}
+
+#[test]
 fn test_type_registry() {
     let dir = create_test_project(&[("a.py", "x: int = 42\n"), ("b.py", "y: str = 'hello'\n")]);
 

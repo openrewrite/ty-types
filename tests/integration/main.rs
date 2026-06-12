@@ -1358,3 +1358,43 @@ fn test_library_all_keeps_underscore_reexport() {
     assert!(syms.contains(&"_Reexported"), "underscore name in __all__ kept: {syms:?}");
     assert!(!syms.contains(&"NotExported"), "non-underscore name absent from __all__ dropped: {syms:?}");
 }
+
+fn get_stdlib_api_request(modules: &[&str], id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getStdlibApi",
+        "params": {"modules": modules},
+        "id": id
+    })
+    .to_string()
+}
+
+#[test]
+fn test_stdlib_single_module_with_classref_boundary() {
+    // Extract just `string`: its own classes are full classLiterals, while a
+    // referenced builtins class (str) — outside the requested set — is a classRef.
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_stdlib_api_request(&["string"], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+
+    assert!(modules.iter().any(|m| m["name"] == "string"), "should emit `string`");
+    assert!(!modules.iter().any(|m| m["name"] == "os"), "should not emit unrequested `os`");
+
+    let string_mod = modules.iter().find(|m| m["name"] == "string").unwrap();
+    let has_template = string_mod["symbols"].as_array().unwrap()
+        .iter().any(|s| s["name"] == "Template");
+    assert!(has_template, "string should expose Template");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert!(!types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "builtins str must not be a full classLiteral");
+    assert!(types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "builtins str should be a classRef");
+}

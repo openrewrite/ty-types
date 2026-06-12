@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
+use rustc_hash::FxHashSet;
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
+use ty_module_resolver::all_modules;
 use ty_project::ProjectDatabase;
 use ty_python_core::global_scope;
 use ty_python_semantic::types::list_members::all_end_of_scope_members;
@@ -98,6 +100,34 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
     Ok(modules)
 }
 
+/// Register the public top-level symbols of each `(module_name, file, rel)` into
+/// the registry, producing one `LibraryModuleInfo` per module.
+fn collect_modules<'db>(
+    db: &'db ProjectDatabase,
+    items: impl IntoIterator<Item = (String, ruff_db::files::File, String)>,
+    registry: &mut TypeRegistry<'db>,
+) -> Vec<LibraryModuleInfo> {
+    let mut modules = Vec::new();
+    for (name, file, rel) in items {
+        let scope = global_scope(db, file);
+        let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, file);
+
+        let mut symbols = Vec::new();
+        for mwd in all_end_of_scope_members(db, scope) {
+            let sym_name = mwd.member.name.as_str();
+            if !is_public_symbol(sym_name, dunder_all) {
+                continue;
+            }
+            let type_id = registry.register(mwd.member.ty, db).type_id;
+            symbols.push(LibrarySymbolInfo { name: sym_name.to_string(), type_id });
+        }
+        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        modules.push(LibraryModuleInfo { name, file: rel, symbols });
+    }
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    modules
+}
+
 /// Extract the public API of the package rooted at `root`. `registry` should be
 /// constructed with `TypeRegistry::with_boundary_root(root)` so types defined outside
 /// the package collapse to `classRef`.
@@ -106,7 +136,7 @@ pub fn extract_library_api<'db>(
     root: &SystemPath,
     registry: &mut TypeRegistry<'db>,
 ) -> anyhow::Result<Vec<LibraryModuleInfo>> {
-    let mut modules = Vec::new();
+    let mut items = Vec::new();
 
     // Modules that ty cannot resolve to a dotted name (e.g. a stray file with no
     // reachable package chain) are silently skipped — they are not part of any
@@ -118,32 +148,40 @@ pub fn extract_library_api<'db>(
         let Some(module) = ty_module_resolver::file_to_module(db, file) else {
             continue;
         };
-        let name = module.name(db).to_string();
-
-        let scope = global_scope(db, file);
-        let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, file);
-
-        let mut symbols = Vec::new();
-        for mwd in all_end_of_scope_members(db, scope) {
-            let sym_name = mwd.member.name.as_str();
-            if !is_public_symbol(sym_name, dunder_all) {
-                continue;
-            }
-            let type_id = registry.register(mwd.member.ty, db).type_id;
-            symbols.push(LibrarySymbolInfo {
-                name: sym_name.to_string(),
-                type_id,
-            });
-        }
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
-
-        modules.push(LibraryModuleInfo {
-            name,
-            file: discovered.rel,
-            symbols,
-        });
+        items.push((module.name(db).to_string(), file, discovered.rel));
     }
 
-    modules.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(modules)
+    Ok(collect_modules(db, items, registry))
+}
+
+/// Extract the public API of the standard library. `requested` is the set of
+/// top-level module names to emit; empty ⇒ all stdlib modules. Build `registry`
+/// with `TypeRegistry::with_boundary_modules(local_set)` (or no boundary when
+/// every stdlib module is local).
+pub fn extract_stdlib_api<'db>(
+    db: &'db ProjectDatabase,
+    requested: &FxHashSet<String>,
+    registry: &mut TypeRegistry<'db>,
+) -> Vec<LibraryModuleInfo> {
+    let mut items = Vec::new();
+    for module in all_modules(db) {
+        let is_stdlib = module
+            .search_path(db)
+            .is_some_and(|sp| sp.is_standard_library());
+        if !is_stdlib {
+            continue;
+        }
+        let name = module.name(db).to_string();
+        let top = name.split('.').next().unwrap_or(name.as_str());
+        // `_typeshed` is typeshed's internal helper package, not an importable module.
+        if top == "_typeshed" {
+            continue;
+        }
+        if !requested.is_empty() && !requested.contains(top) {
+            continue;
+        }
+        let Some(file) = module.file(db) else { continue };
+        items.push((name.clone(), file, name));
+    }
+    collect_modules(db, items, registry)
 }

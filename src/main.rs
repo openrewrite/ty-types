@@ -10,8 +10,9 @@ use std::io::{self, BufRead, Write};
 use std::process;
 
 use protocol::{
-    CliResult, GetLibraryApiParams, GetLibraryApiResult, GetTypeRegistryResult, GetTypesParams,
-    GetTypesResult, InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    CliResult, GetLibraryApiParams, GetLibraryApiResult, GetStdlibApiParams, GetTypeRegistryResult,
+    GetTypesParams, GetTypesResult, InitializeParams, InitializeResult, JsonRpcRequest,
+    JsonRpcResponse,
 };
 use registry::TypeRegistry;
 use ruff_db::files::system_path_to_file;
@@ -255,6 +256,10 @@ fn run_session(
                 let response = handle_get_library_api(&request, db);
                 write_response(stdout, &response);
             }
+            "getStdlibApi" => {
+                let response = handle_get_stdlib_api(&request, db);
+                write_response(stdout, &response);
+            }
             "shutdown" => {
                 write_response(
                     stdout,
@@ -438,6 +443,39 @@ fn handle_get_library_api(
             );
         }
     };
+
+    let mut types = registry.all_descriptors();
+    if !params.include_display {
+        for desc in types.values_mut() {
+            desc.strip_display();
+        }
+    }
+
+    let response = GetLibraryApiResult { modules, types };
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
+}
+
+fn handle_get_stdlib_api<'db>(
+    request: &JsonRpcRequest,
+    db: &'db ProjectDatabase,
+) -> JsonRpcResponse {
+    let params: GetStdlibApiParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"));
+        }
+    };
+
+    let requested: rustc_hash::FxHashSet<String> = params.modules.into_iter().collect();
+    // A subset request makes everything outside it a classRef; an empty request
+    // means all stdlib is local, so no boundary cut is needed (full expansion).
+    let mut registry = if requested.is_empty() {
+        TypeRegistry::new()
+    } else {
+        TypeRegistry::with_boundary_modules(requested.clone())
+    };
+
+    let modules = library::extract_stdlib_api(db, &requested, &mut registry);
 
     let mut types = registry.all_descriptors();
     if !params.include_display {

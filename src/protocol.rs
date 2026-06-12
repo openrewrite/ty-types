@@ -78,6 +78,17 @@ pub struct GetLibraryApiParams {
     pub include_display: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetStdlibApiParams {
+    /// Top-level stdlib module names to extract as the local unit. Empty ⇒ all
+    /// stdlib modules are local (a single fully-expanded dump).
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
+}
+
 // ─── Response payloads ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

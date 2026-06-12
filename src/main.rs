@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod collector;
+mod library;
 mod project;
 mod protocol;
 mod registry;
@@ -9,8 +10,8 @@ use std::io::{self, BufRead, Write};
 use std::process;
 
 use protocol::{
-    CliResult, GetTypeRegistryResult, GetTypesParams, GetTypesResult, InitializeParams,
-    InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    CliResult, GetLibraryApiParams, GetLibraryApiResult, GetTypeRegistryResult, GetTypesParams,
+    GetTypesResult, InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse,
 };
 use registry::TypeRegistry;
 use ruff_db::files::system_path_to_file;
@@ -250,6 +251,10 @@ fn run_session(
                 let response = handle_get_type_registry(&request, &registry);
                 write_response(stdout, &response);
             }
+            "getLibraryApi" => {
+                let response = handle_get_library_api(&request, db);
+                write_response(stdout, &response);
+            }
             "shutdown" => {
                 write_response(
                     stdout,
@@ -389,5 +394,54 @@ fn handle_get_type_registry(
         types: registry.all_descriptors(),
     };
 
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
+}
+
+fn handle_get_library_api<'db>(
+    request: &JsonRpcRequest,
+    db: &'db ProjectDatabase,
+) -> JsonRpcResponse {
+    let params: GetLibraryApiParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32602,
+                format!("Invalid params: {e}"),
+            );
+        }
+    };
+
+    let root = match SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.root)) {
+        Ok(p) => p,
+        Err(p) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32000,
+                format!("Non-Unicode path: {}", p.display()),
+            );
+        }
+    };
+
+    let mut registry = TypeRegistry::with_boundary(root.clone());
+    let modules = match library::extract_library_api(db, root.as_path(), &mut registry) {
+        Ok(m) => m,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32000,
+                format!("Failed to extract library API: {e}"),
+            );
+        }
+    };
+
+    let mut types = registry.all_descriptors();
+    if !params.include_display {
+        for desc in types.values_mut() {
+            desc.strip_display();
+        }
+    }
+
+    let response = GetLibraryApiResult { modules, types };
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }

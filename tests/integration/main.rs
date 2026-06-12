@@ -89,6 +89,16 @@ fn shutdown_request(id: u64) -> String {
     .to_string()
 }
 
+fn get_library_api_request(root: &str, id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getLibraryApi",
+        "params": {"root": root},
+        "id": id
+    })
+    .to_string()
+}
+
 #[test]
 fn test_initialize_and_shutdown() {
     let dir = create_test_project(&[]);
@@ -1147,4 +1157,38 @@ fn test_non_paramspec_signature_has_no_flags() {
             p
         );
     }
+}
+
+#[test]
+fn test_library_lists_modules_and_symbols() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", "VERSION: str = \"1.0\"\n"),
+        ("mypkg/core.py", "class Widget:\n    size: int = 1\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+
+    let core = modules
+        .iter()
+        .find(|m| m["name"] == "mypkg.core")
+        .expect("should list mypkg.core");
+
+    let widget = core["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Widget")
+        .expect("mypkg.core should expose Widget");
+    let widget_type_id = widget["typeId"].as_u64().unwrap();
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert_eq!(types[&widget_type_id.to_string()]["kind"], "classLiteral");
 }

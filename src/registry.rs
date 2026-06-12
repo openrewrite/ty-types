@@ -1,3 +1,4 @@
+use ruff_db::system::SystemPathBuf;
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
@@ -38,6 +39,12 @@ impl<'db> TypeRegistry<'db> {
             next_id: 1, // start at 1, reserve 0 for "no type"
             tracked_new_ids: Vec::new(),
         }
+    }
+
+    /// Construct a registry whose class-literal expansion is bounded to a package
+    /// root. (Boundary behavior is added in Task 7; for now this ignores `_root`.)
+    pub fn with_boundary(_root: SystemPathBuf) -> Self {
+        Self::new()
     }
 
     /// Register a type and return its ID. If the type was already registered,

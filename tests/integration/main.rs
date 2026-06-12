@@ -1307,3 +1307,54 @@ fn test_library_boundary_classref() {
         .any(|t| t["kind"] == "classRef" && t["className"] == "int");
     assert!(int_ref, "int should appear as a classRef");
 }
+
+#[test]
+fn test_library_cross_module_in_package_is_classliteral() {
+    // A class defined in a sibling module and imported must remain a full
+    // classLiteral (defined inside the package), NOT collapse to a classRef.
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/a.py", "class A:\n    x: int = 0\n"),
+        ("mypkg/b.py", "from mypkg.a import A\n\ndef make() -> A:\n    return A()\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // A must be a full classLiteral with members, and must NOT appear as a classRef.
+    let a_full = types.values().find(|t| t["kind"] == "classLiteral" && t["className"] == "A");
+    assert!(a_full.is_some(), "sibling-module class A should be a full classLiteral, got types: {:#?}",
+        types.values().filter(|t| t["className"] == "A").collect::<Vec<_>>());
+    assert!(a_full.unwrap()["members"].as_array().map(|m| !m.is_empty()).unwrap_or(false),
+        "A should carry members");
+    let a_ref = types.values().any(|t| t["kind"] == "classRef" && t["className"] == "A");
+    assert!(!a_ref, "in-package class A must not be a classRef");
+}
+
+#[test]
+fn test_library_all_keeps_underscore_reexport() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/m.py", "__all__ = [\"_Reexported\"]\nclass _Reexported: pass\nclass NotExported: pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+    let m = modules.iter().find(|m| m["name"] == "mypkg.m").unwrap();
+    let syms: Vec<&str> = m["symbols"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(syms.contains(&"_Reexported"), "underscore name in __all__ kept: {syms:?}");
+    assert!(!syms.contains(&"NotExported"), "non-underscore name absent from __all__ dropped: {syms:?}");
+}

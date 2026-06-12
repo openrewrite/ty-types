@@ -108,6 +108,9 @@ pub fn extract_library_api<'db>(
 ) -> anyhow::Result<Vec<LibraryModuleInfo>> {
     let mut modules = Vec::new();
 
+    // Modules that ty cannot resolve to a dotted name (e.g. a stray file with no
+    // reachable package chain) are silently skipped — they are not part of any
+    // importable public API.
     for discovered in discover_module_files(root)? {
         let Ok(file) = system_path_to_file(db, discovered.abs.as_path()) else {
             continue;

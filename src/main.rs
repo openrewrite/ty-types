@@ -397,9 +397,9 @@ fn handle_get_type_registry(
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }
 
-fn handle_get_library_api<'db>(
+fn handle_get_library_api(
     request: &JsonRpcRequest,
-    db: &'db ProjectDatabase,
+    db: &ProjectDatabase,
 ) -> JsonRpcResponse {
     let params: GetLibraryApiParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,

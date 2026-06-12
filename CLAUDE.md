@@ -37,7 +37,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 
 JSON-RPC over stdin/stdout, one JSON object per line.
 
-Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
+Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `shutdown`.
 
 ## TypeDescriptor Variants
 
@@ -48,6 +48,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`) | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint | `base` |
+| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |

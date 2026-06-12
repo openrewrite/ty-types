@@ -455,9 +455,9 @@ fn handle_get_library_api(
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }
 
-fn handle_get_stdlib_api<'db>(
+fn handle_get_stdlib_api(
     request: &JsonRpcRequest,
-    db: &'db ProjectDatabase,
+    db: &ProjectDatabase,
 ) -> JsonRpcResponse {
     let params: GetStdlibApiParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,

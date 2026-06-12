@@ -37,7 +37,9 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 
 JSON-RPC over stdin/stdout, one JSON object per line.
 
-Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `shutdown`.
+Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `getStdlibApi`, `shutdown`.
+
+`getStdlibApi` extracts the standard library's public API for the project's configured Python version. Its `modules` param selects the local unit (top-level module names): classes in those modules are full `classLiteral`s, classes elsewhere become `classRef`. Omitting `modules` returns all stdlib modules fully expanded.
 
 ## TypeDescriptor Variants
 

@@ -1398,3 +1398,53 @@ fn test_stdlib_single_module_with_classref_boundary() {
     assert!(types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
         "builtins str should be a classRef");
 }
+
+#[test]
+fn test_stdlib_multi_module_local_set() {
+    // Request `string` + `builtins` together: both are local, so builtins `str`
+    // is a full classLiteral (not a classRef), and an unrequested module is absent.
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_stdlib_api_request(&["string", "builtins"], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+    assert!(modules.iter().any(|m| m["name"] == "string"), "string emitted");
+    assert!(modules.iter().any(|m| m["name"] == "builtins"), "builtins emitted");
+    assert!(!modules.iter().any(|m| m["name"] == "os"), "os not requested");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    // builtins is in the local set, so str is a full classLiteral, not a classRef.
+    assert!(types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "str should be a full classLiteral when builtins is in the local set");
+    assert!(!types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "str should not be a classRef when builtins is requested");
+}
+
+#[test]
+fn test_stdlib_all_modules_dump() {
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        // No `modules` ⇒ all stdlib local, fully expanded.
+        &get_stdlib_api_request(&[], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+    for expected in ["os", "sys", "collections", "builtins"] {
+        assert!(modules.iter().any(|m| m["name"] == expected),
+            "stdlib dump should include `{expected}`");
+    }
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert!(types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "in a whole-stdlib dump, str should be a full classLiteral");
+    assert!(!types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "in a whole-stdlib dump, str should not be a classRef");
+}

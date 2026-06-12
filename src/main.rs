@@ -427,7 +427,7 @@ fn handle_get_library_api(
     // boundary state is request-scoped, and library extraction must not share or
     // pollute the session's getTypes type IDs. `root` is used as supplied by the
     // caller; the caller is expected to pass a clean absolute path.
-    let mut registry = TypeRegistry::with_boundary(root.clone());
+    let mut registry = TypeRegistry::with_boundary_root(root.clone());
     let modules = match library::extract_library_api(db, root.as_path(), &mut registry) {
         Ok(m) => m,
         Err(e) => {

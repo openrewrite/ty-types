@@ -1,4 +1,4 @@
-use ruff_db::system::{SystemPath, SystemPathBuf};
+use ruff_db::system::SystemPathBuf;
 use rustc_hash::FxHashMap;
 use ty_python_semantic::Db;
 use ty_python_semantic::types::list_members;
@@ -13,6 +13,14 @@ use crate::protocol::{
     TypedDictFieldInfo,
 };
 
+/// Bounds which class literals get fully expanded vs. emitted as `classRef`.
+pub enum Boundary {
+    /// Local iff the class's file is under this filesystem root (package extraction).
+    UnderRoot(SystemPathBuf),
+    /// Local iff the class's top-level module name is in this set (stdlib extraction).
+    Modules(rustc_hash::FxHashSet<String>),
+}
+
 /// A session-scoped registry that deduplicates types by identity.
 ///
 /// Since ty's `Type<'db>` derives `Hash + Eq` and Salsa interns types,
@@ -24,20 +32,14 @@ pub struct TypeRegistry<'db> {
     /// Tracks all type IDs registered since the last `start_tracking()` call,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
-    /// When set, class literals whose definition file is not under this root
+    /// When set, class literals whose definition file is not local to the boundary
     /// are emitted as `classRef` instead of being expanded.
-    boundary_root: Option<SystemPathBuf>,
+    boundary: Option<Boundary>,
 }
 
 pub struct RegistrationResult {
     pub type_id: TypeId,
     pub is_new: bool,
-}
-
-fn file_under_root(db: &dyn Db, file: ruff_db::files::File, root: &SystemPath) -> bool {
-    file.path(db)
-        .as_system_path()
-        .is_some_and(|p| p.starts_with(root))
 }
 
 impl<'db> TypeRegistry<'db> {
@@ -47,17 +49,47 @@ impl<'db> TypeRegistry<'db> {
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
             tracked_new_ids: Vec::new(),
-            boundary_root: None,
+            boundary: None,
         }
     }
 
-    /// Construct a registry that bounds class-literal expansion to `root`:
-    /// classes defined outside `root` are emitted as `classRef`.
-    pub fn with_boundary(root: SystemPathBuf) -> Self {
+    /// Bound class-literal expansion to a filesystem `root` (package extraction).
+    pub fn with_boundary_root(root: SystemPathBuf) -> Self {
         Self {
-            boundary_root: Some(root),
+            boundary: Some(Boundary::UnderRoot(root)),
             ..Self::new()
         }
+    }
+
+    /// Bound class-literal expansion to a set of top-level module names
+    /// (stdlib extraction): classes outside these modules become `classRef`.
+    pub fn with_boundary_modules(modules: rustc_hash::FxHashSet<String>) -> Self {
+        Self {
+            boundary: Some(Boundary::Modules(modules)),
+            ..Self::new()
+        }
+    }
+
+    /// Whether a class defined in `file` should be emitted as a `classRef`
+    /// (a boundary is set and the class is not local to it).
+    fn is_external(&self, db: &dyn Db, file: ruff_db::files::File) -> bool {
+        let Some(boundary) = &self.boundary else {
+            return false;
+        };
+        let local = match boundary {
+            Boundary::UnderRoot(root) => file
+                .path(db)
+                .as_system_path()
+                .is_some_and(|p| p.starts_with(root.as_path())),
+            Boundary::Modules(modules) => {
+                ty_module_resolver::file_to_module(db, file).is_some_and(|m| {
+                    let name = m.name(db).to_string();
+                    let top = name.split('.').next().unwrap_or(name.as_str());
+                    modules.contains(top)
+                })
+            }
+        };
+        !local
     }
 
     /// Register a type and return its ID. If the type was already registered,
@@ -416,10 +448,7 @@ impl<'db> TypeRegistry<'db> {
 
             Type::ClassLiteral(class_literal) => {
                 let cl_file = class_literal.file(db);
-                let external = self
-                    .boundary_root
-                    .as_ref()
-                    .is_some_and(|root| !file_under_root(db, cl_file, root.as_path()));
+                let external = self.is_external(db, cl_file);
                 if external {
                     let display = self.display_string(ty, db);
                     let class_name = class_literal.name(db).to_string();
@@ -466,10 +495,7 @@ impl<'db> TypeRegistry<'db> {
             Type::GenericAlias(alias) => {
                 let origin = alias.origin(db);
                 let origin_file = origin.file(db);
-                let external = self
-                    .boundary_root
-                    .as_ref()
-                    .is_some_and(|root| !file_under_root(db, origin_file, root.as_path()));
+                let external = self.is_external(db, origin_file);
                 if external {
                     let display = self.display_string(ty, db);
                     let class_name = origin.name(db).to_string();

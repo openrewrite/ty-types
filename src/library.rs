@@ -99,7 +99,7 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
 }
 
 /// Extract the public API of the package rooted at `root`. `registry` should be
-/// constructed with `TypeRegistry::with_boundary(root)` so types defined outside
+/// constructed with `TypeRegistry::with_boundary_root(root)` so types defined outside
 /// the package collapse to `classRef`.
 pub fn extract_library_api<'db>(
     db: &'db ProjectDatabase,

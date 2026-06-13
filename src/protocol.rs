@@ -55,6 +55,14 @@ impl JsonRpcResponse {
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub project_root: String,
+    /// First-party package root. When set, the session's `getTypes` registry emits
+    /// classes defined outside this root as `classRef` (identity only).
+    #[serde(default)]
+    pub first_party_root: Option<String>,
+    /// First-party top-level module names. Used when `first_party_root` is absent:
+    /// classes outside these modules are emitted as `classRef`.
+    #[serde(default)]
+    pub first_party_modules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +75,26 @@ pub struct GetTypesParams {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibraryApiParams {
+    /// Absolute path to the installed package directory to extract.
+    pub root: String,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetStdlibApiParams {
+    /// Top-level stdlib module names to extract as the local unit. Empty ⇒ all
+    /// stdlib modules are local (a single fully-expanded dump).
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
 }
 
 // ─── Response payloads ───────────────────────────────────────────────
@@ -86,6 +114,30 @@ pub struct GetTypesResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTypeRegistryResult {
+    pub types: HashMap<TypeId, TypeDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySymbolInfo {
+    pub name: String,
+    pub type_id: TypeId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryModuleInfo {
+    /// Dotted module FQN, e.g. "requests.sessions".
+    pub name: String,
+    /// Module file path relative to the package root, e.g. "sessions.py".
+    pub file: String,
+    pub symbols: Vec<LibrarySymbolInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibraryApiResult {
+    pub modules: Vec<LibraryModuleInfo>,
     pub types: HashMap<TypeId, TypeDescriptor>,
 }
 
@@ -205,6 +257,18 @@ pub enum TypeDescriptor {
         supertypes: Vec<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         members: Vec<ClassMemberInfo>,
+    },
+
+    // Reference to a class defined outside the extracted package boundary.
+    // Identity only — no members, supertypes, or type parameters. Maps to
+    // the V3 type-table TAG_CLASS_REF on the consumer side.
+    #[serde(rename_all = "camelCase")]
+    ClassRef {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        class_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
     },
 
     // type[C] — subclass-of
@@ -480,6 +544,7 @@ impl TypeDescriptor {
         match self {
             Self::Instance { display, .. }
             | Self::ClassLiteral { display, .. }
+            | Self::ClassRef { display, .. }
             | Self::SubclassOf { display, .. }
             | Self::TypeForm { display, .. }
             | Self::Union { display, .. }

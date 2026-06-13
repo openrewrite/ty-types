@@ -89,6 +89,16 @@ fn shutdown_request(id: u64) -> String {
     .to_string()
 }
 
+fn get_library_api_request(root: &str, id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getLibraryApi",
+        "params": {"root": root},
+        "id": id
+    })
+    .to_string()
+}
+
 #[test]
 fn test_initialize_and_shutdown() {
     let dir = create_test_project(&[]);
@@ -1147,4 +1157,363 @@ fn test_non_paramspec_signature_has_no_flags() {
             p
         );
     }
+}
+
+#[test]
+fn test_library_lists_modules_and_symbols() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", "VERSION: str = \"1.0\"\n"),
+        ("mypkg/core.py", "class Widget:\n    size: int = 1\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+
+    let core = modules
+        .iter()
+        .find(|m| m["name"] == "mypkg.core")
+        .expect("should list mypkg.core");
+
+    let widget = core["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Widget")
+        .expect("mypkg.core should expose Widget");
+    let widget_type_id = widget["typeId"].as_u64().unwrap();
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert_eq!(types[&widget_type_id.to_string()]["kind"], "classLiteral");
+}
+
+#[test]
+fn test_library_excludes_private_modules() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/public.py", "class Public: pass\n"),
+        ("mypkg/_private.py", "class Hidden: pass\n"),
+        ("mypkg/_internal/__init__.py", ""),
+        ("mypkg/_internal/secret.py", "class Secret: pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+    let names: Vec<&str> = modules.iter().map(|m| m["name"].as_str().unwrap()).collect();
+
+    assert!(names.contains(&"mypkg.public"), "public module kept: {names:?}");
+    assert!(!names.iter().any(|n| n.contains("_private")), "drop _private.py: {names:?}");
+    assert!(!names.iter().any(|n| n.contains("_internal")), "drop _internal pkg: {names:?}");
+}
+
+#[test]
+fn test_library_prefers_pyi_stub() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/mod.py", "value = 1\n"),
+        ("mypkg/mod.pyi", "value: str\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().unwrap();
+    let m = modules.iter().find(|m| m["name"] == "mypkg.mod").expect("mypkg.mod present");
+    assert_eq!(m["file"], "mod.pyi", "should choose the stub file");
+
+    let value = m["symbols"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "value").expect("value symbol");
+    let type_id = value["typeId"].as_u64().unwrap();
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert_eq!(types[&type_id.to_string()]["display"], "str");
+}
+
+#[test]
+fn test_library_symbol_visibility() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/curated.py", "__all__ = [\"Exported\"]\nclass Exported: pass\nclass Hidden: pass\n"),
+        ("mypkg/plain.py", "class Shown: pass\ndef _helper(): pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+
+    let curated = modules.iter().find(|m| m["name"] == "mypkg.curated").unwrap();
+    let curated_syms: Vec<&str> = curated["symbols"].as_array().unwrap()
+        .iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(curated_syms.contains(&"Exported"), "Exported kept: {curated_syms:?}");
+    assert!(!curated_syms.contains(&"Hidden"), "Hidden excluded by __all__: {curated_syms:?}");
+
+    let plain = modules.iter().find(|m| m["name"] == "mypkg.plain").unwrap();
+    let plain_syms: Vec<&str> = plain["symbols"].as_array().unwrap()
+        .iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(plain_syms.contains(&"Shown"), "Shown kept: {plain_syms:?}");
+    assert!(!plain_syms.contains(&"_helper"), "_helper excluded: {plain_syms:?}");
+}
+
+#[test]
+fn test_library_boundary_classref() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/core.py", "class Widget:\n    size: int = 1\n\ndef make() -> Widget:\n    return Widget()\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // The in-package class is a full classLiteral with members.
+    let widget = types.values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Widget")
+        .expect("Widget should be a full classLiteral");
+    assert!(widget["members"].as_array().map(|m| !m.is_empty()).unwrap_or(false),
+        "Widget should carry members");
+
+    // `int` (typeshed, outside the package) must appear ONLY as a classRef.
+    let int_full = types.values()
+        .any(|t| t["kind"] == "classLiteral" && t["className"] == "int");
+    assert!(!int_full, "int must not be expanded as a full classLiteral");
+    let int_ref = types.values()
+        .any(|t| t["kind"] == "classRef" && t["className"] == "int");
+    assert!(int_ref, "int should appear as a classRef");
+}
+
+#[test]
+fn test_library_cross_module_in_package_is_classliteral() {
+    // A class defined in a sibling module and imported must remain a full
+    // classLiteral (defined inside the package), NOT collapse to a classRef.
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/a.py", "class A:\n    x: int = 0\n"),
+        ("mypkg/b.py", "from mypkg.a import A\n\ndef make() -> A:\n    return A()\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // A must be a full classLiteral with members, and must NOT appear as a classRef.
+    let a_full = types.values().find(|t| t["kind"] == "classLiteral" && t["className"] == "A");
+    assert!(a_full.is_some(), "sibling-module class A should be a full classLiteral, got types: {:#?}",
+        types.values().filter(|t| t["className"] == "A").collect::<Vec<_>>());
+    assert!(a_full.unwrap()["members"].as_array().map(|m| !m.is_empty()).unwrap_or(false),
+        "A should carry members");
+    let a_ref = types.values().any(|t| t["kind"] == "classRef" && t["className"] == "A");
+    assert!(!a_ref, "in-package class A must not be a classRef");
+}
+
+#[test]
+fn test_library_all_keeps_underscore_reexport() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/m.py", "__all__ = [\"_Reexported\"]\nclass _Reexported: pass\nclass NotExported: pass\n"),
+    ]);
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"].as_array().unwrap();
+    let m = modules.iter().find(|m| m["name"] == "mypkg.m").unwrap();
+    let syms: Vec<&str> = m["symbols"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(syms.contains(&"_Reexported"), "underscore name in __all__ kept: {syms:?}");
+    assert!(!syms.contains(&"NotExported"), "non-underscore name absent from __all__ dropped: {syms:?}");
+}
+
+fn get_stdlib_api_request(modules: &[&str], id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getStdlibApi",
+        "params": {"modules": modules},
+        "id": id
+    })
+    .to_string()
+}
+
+#[test]
+fn test_stdlib_single_module_with_classref_boundary() {
+    // Extract just `string`: its own classes are full classLiterals, while a
+    // referenced builtins class (str) — outside the requested set — is a classRef.
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_stdlib_api_request(&["string"], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+
+    assert!(modules.iter().any(|m| m["name"] == "string"), "should emit `string`");
+    assert!(!modules.iter().any(|m| m["name"] == "os"), "should not emit unrequested `os`");
+
+    let string_mod = modules.iter().find(|m| m["name"] == "string").unwrap();
+    let has_template = string_mod["symbols"].as_array().unwrap()
+        .iter().any(|s| s["name"] == "Template");
+    assert!(has_template, "string should expose Template");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert!(!types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "builtins str must not be a full classLiteral");
+    assert!(types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "builtins str should be a classRef");
+}
+
+#[test]
+fn test_stdlib_multi_module_local_set() {
+    // Request `string` + `builtins` together: both are local, so builtins `str`
+    // is a full classLiteral (not a classRef), and an unrequested module is absent.
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_stdlib_api_request(&["string", "builtins"], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+    assert!(modules.iter().any(|m| m["name"] == "string"), "string emitted");
+    assert!(modules.iter().any(|m| m["name"] == "builtins"), "builtins emitted");
+    assert!(!modules.iter().any(|m| m["name"] == "os"), "os not requested");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    // builtins is in the local set, so str is a full classLiteral, not a classRef.
+    assert!(types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "str should be a full classLiteral when builtins is in the local set");
+    assert!(!types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "str should not be a classRef when builtins is requested");
+}
+
+#[test]
+fn test_stdlib_all_modules_dump() {
+    let dir = create_test_project(&[("placeholder.py", "x = 1\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        // No `modules` ⇒ all stdlib local, fully expanded.
+        &get_stdlib_api_request(&[], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+    for expected in ["os", "sys", "collections", "builtins"] {
+        assert!(modules.iter().any(|m| m["name"] == expected),
+            "stdlib dump should include `{expected}`");
+    }
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    assert!(types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "str"),
+        "in a whole-stdlib dump, str should be a full classLiteral");
+    assert!(!types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
+        "in a whole-stdlib dump, str should not be a classRef");
+}
+
+fn initialize_request_with_first_party_root(
+    project_root: &str,
+    first_party_root: &str,
+    id: u64,
+) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {"projectRoot": project_root, "firstPartyRoot": first_party_root},
+        "id": id
+    })
+    .to_string()
+}
+
+#[test]
+fn test_gettypes_first_party_boundary_classref() {
+    // With a first-party boundary set at initialize, getTypes expands first-party
+    // classes fully but emits external (stdlib/typeshed) classes as classRef.
+    let dir = create_test_project(&[("a.py", "class Local:\n    val: int = 0\n")]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request_with_first_party_root(root, root, 1),
+        &get_types_request("a.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+
+    // Local is first-party (under the boundary root) → full classLiteral.
+    assert!(
+        types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "Local"),
+        "Local should be a full classLiteral"
+    );
+    // builtins `int` (typeshed, outside the boundary) → classRef, never a full classLiteral.
+    assert!(
+        !types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "int"),
+        "int must not be a full classLiteral under the first-party boundary"
+    );
+    assert!(
+        types.values().any(|t| t["kind"] == "classRef" && t["className"] == "int"),
+        "int should be a classRef under the first-party boundary"
+    );
+}
+
+#[test]
+fn test_gettypes_no_boundary_full_expansion() {
+    // Without a boundary (no firstPartyRoot), getTypes fully expands every class,
+    // exactly as before — no classRef descriptors are produced.
+    let dir = create_test_project(&[("a.py", "class Local:\n    val: int = 0\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("a.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+
+    assert!(
+        types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "int"),
+        "without a boundary, int should be a full classLiteral"
+    );
+    assert!(
+        !types.values().any(|t| t["kind"] == "classRef"),
+        "without a boundary, there should be no classRef descriptors"
+    );
 }

@@ -37,7 +37,11 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 
 JSON-RPC over stdin/stdout, one JSON object per line.
 
-Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
+Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `getStdlibApi`, `shutdown`.
+
+`getStdlibApi` extracts the standard library's public API for the project's configured Python version. Its `modules` param selects the local unit (top-level module names): classes in those modules are full `classLiteral`s, classes elsewhere become `classRef`. Omitting `modules` returns all stdlib modules fully expanded.
+
+`initialize` accepts an optional first-party boundary that the session's `getTypes` registry honors: `firstPartyRoot` (a package root path) or `firstPartyModules` (top-level module names; used when `firstPartyRoot` is absent). When set, `getTypes` emits classes defined outside the boundary as `classRef` instead of fully expanding them; with neither field, every class is fully expanded (default behavior). `firstPartyRoot` takes precedence if both are given.
 
 ## TypeDescriptor Variants
 
@@ -48,6 +52,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`) | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint | `base` |
+| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |

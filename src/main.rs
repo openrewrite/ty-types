@@ -318,6 +318,21 @@ fn write_response(stdout: &io::Stdout, response: &JsonRpcResponse) {
     let _ = out.flush();
 }
 
+/// Parse a path string into a `SystemPathBuf`, returning a JSON-RPC error
+/// response (tagged with `id`) if the path is not valid Unicode.
+fn parse_system_path(
+    path: &str,
+    id: &serde_json::Value,
+) -> Result<SystemPathBuf, JsonRpcResponse> {
+    SystemPathBuf::from_path_buf(std::path::PathBuf::from(path)).map_err(|p| {
+        JsonRpcResponse::error(
+            id.clone(),
+            -32000,
+            format!("Non-Unicode path: {}", p.display()),
+        )
+    })
+}
+
 fn do_initialize(
     request: &JsonRpcRequest,
 ) -> Result<(ProjectDatabase, SystemPathBuf, Option<Boundary>), JsonRpcResponse> {
@@ -325,33 +340,19 @@ fn do_initialize(
         JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"))
     })?;
 
-    let root = SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.project_root))
-        .map_err(|p| {
-            JsonRpcResponse::error(
-                request.id.clone(),
-                -32000,
-                format!("Non-Unicode path: {}", p.display()),
-            )
-        })?;
+    let root = parse_system_path(&params.project_root, &request.id)?;
 
-    // Optional first-party boundary for the session's getTypes registry. A
-    // `firstPartyRoot` takes precedence over `firstPartyModules`; with neither,
-    // there is no boundary and classes are fully expanded as before.
+    // Optional first-party boundary for the session's getTypes registry.
+    // `firstPartyRoot` takes precedence; `firstPartyModules` is ignored when it
+    // is set. With neither, there is no boundary (classes are fully expanded).
     let boundary = if let Some(first_party_root) = &params.first_party_root {
-        let first_party_root =
-            SystemPathBuf::from_path_buf(std::path::PathBuf::from(first_party_root)).map_err(
-                |p| {
-                    JsonRpcResponse::error(
-                        request.id.clone(),
-                        -32000,
-                        format!("Non-Unicode path: {}", p.display()),
-                    )
-                },
-            )?;
-        Some(Boundary::UnderRoot(first_party_root))
+        Some(Boundary::UnderRoot(parse_system_path(
+            first_party_root,
+            &request.id,
+        )?))
     } else if !params.first_party_modules.is_empty() {
         Some(Boundary::Modules(
-            params.first_party_modules.iter().cloned().collect(),
+            params.first_party_modules.into_iter().collect(),
         ))
     } else {
         None
@@ -446,15 +447,9 @@ fn handle_get_library_api(
         }
     };
 
-    let root = match SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.root)) {
+    let root = match parse_system_path(&params.root, &request.id) {
         Ok(p) => p,
-        Err(p) => {
-            return JsonRpcResponse::error(
-                request.id.clone(),
-                -32000,
-                format!("Non-Unicode path: {}", p.display()),
-            );
-        }
+        Err(resp) => return resp,
     };
 
     // Use a fresh, boundary-scoped registry per call (not the session registry):

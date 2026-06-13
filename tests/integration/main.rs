@@ -1448,3 +1448,72 @@ fn test_stdlib_all_modules_dump() {
     assert!(!types.values().any(|t| t["kind"] == "classRef" && t["className"] == "str"),
         "in a whole-stdlib dump, str should not be a classRef");
 }
+
+fn initialize_request_with_first_party_root(
+    project_root: &str,
+    first_party_root: &str,
+    id: u64,
+) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {"projectRoot": project_root, "firstPartyRoot": first_party_root},
+        "id": id
+    })
+    .to_string()
+}
+
+#[test]
+fn test_gettypes_first_party_boundary_classref() {
+    // With a first-party boundary set at initialize, getTypes expands first-party
+    // classes fully but emits external (stdlib/typeshed) classes as classRef.
+    let dir = create_test_project(&[("a.py", "class Local:\n    val: int = 0\n")]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request_with_first_party_root(root, root, 1),
+        &get_types_request("a.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+
+    // Local is first-party (under the boundary root) → full classLiteral.
+    assert!(
+        types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "Local"),
+        "Local should be a full classLiteral"
+    );
+    // builtins `int` (typeshed, outside the boundary) → classRef, never a full classLiteral.
+    assert!(
+        !types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "int"),
+        "int must not be a full classLiteral under the first-party boundary"
+    );
+    assert!(
+        types.values().any(|t| t["kind"] == "classRef" && t["className"] == "int"),
+        "int should be a classRef under the first-party boundary"
+    );
+}
+
+#[test]
+fn test_gettypes_no_boundary_full_expansion() {
+    // Without a boundary (no firstPartyRoot), getTypes fully expands every class,
+    // exactly as before — no classRef descriptors are produced.
+    let dir = create_test_project(&[("a.py", "class Local:\n    val: int = 0\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("a.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+
+    assert!(
+        types.values().any(|t| t["kind"] == "classLiteral" && t["className"] == "int"),
+        "without a boundary, int should be a full classLiteral"
+    );
+    assert!(
+        !types.values().any(|t| t["kind"] == "classRef"),
+        "without a boundary, there should be no classRef descriptors"
+    );
+}

@@ -53,21 +53,24 @@ impl<'db> TypeRegistry<'db> {
         }
     }
 
-    /// Bound class-literal expansion to a filesystem `root` (package extraction).
-    pub fn with_boundary_root(root: SystemPathBuf) -> Self {
+    /// Construct a registry with an explicit boundary: classes outside it are
+    /// emitted as `classRef` instead of being fully expanded.
+    pub fn with_boundary(boundary: Boundary) -> Self {
         Self {
-            boundary: Some(Boundary::UnderRoot(root)),
+            boundary: Some(boundary),
             ..Self::new()
         }
+    }
+
+    /// Bound class-literal expansion to a filesystem `root` (package extraction).
+    pub fn with_boundary_root(root: SystemPathBuf) -> Self {
+        Self::with_boundary(Boundary::UnderRoot(root))
     }
 
     /// Bound class-literal expansion to a set of top-level module names
     /// (stdlib extraction): classes outside these modules become `classRef`.
     pub fn with_boundary_modules(modules: rustc_hash::FxHashSet<String>) -> Self {
-        Self {
-            boundary: Some(Boundary::Modules(modules)),
-            ..Self::new()
-        }
+        Self::with_boundary(Boundary::Modules(modules))
     }
 
     /// Whether a class defined in `file` should be emitted as a `classRef`

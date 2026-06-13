@@ -41,6 +41,8 @@ Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `getStdli
 
 `getStdlibApi` extracts the standard library's public API for the project's configured Python version. Its `modules` param selects the local unit (top-level module names): classes in those modules are full `classLiteral`s, classes elsewhere become `classRef`. Omitting `modules` returns all stdlib modules fully expanded.
 
+`initialize` accepts an optional first-party boundary that the session's `getTypes` registry honors: `firstPartyRoot` (a package root path) or `firstPartyModules` (top-level module names; used when `firstPartyRoot` is absent). When set, `getTypes` emits classes defined outside the boundary as `classRef` instead of fully expanding them; with neither field, every class is fully expanded (default behavior). `firstPartyRoot` takes precedence if both are given.
+
 ## TypeDescriptor Variants
 
 Each type in the registry is represented as a `TypeDescriptor` with a `kind` discriminator:

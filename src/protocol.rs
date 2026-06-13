@@ -55,6 +55,14 @@ impl JsonRpcResponse {
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub project_root: String,
+    /// First-party package root. When set, the session's `getTypes` registry emits
+    /// classes defined outside this root as `classRef` (identity only).
+    #[serde(default)]
+    pub first_party_root: Option<String>,
+    /// First-party top-level module names. Used when `first_party_root` is absent:
+    /// classes outside these modules are emitted as `classRef`.
+    #[serde(default)]
+    pub first_party_modules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -320,10 +320,7 @@ fn write_response(stdout: &io::Stdout, response: &JsonRpcResponse) {
 
 /// Parse a path string into a `SystemPathBuf`, returning a JSON-RPC error
 /// response (tagged with `id`) if the path is not valid Unicode.
-fn parse_system_path(
-    path: &str,
-    id: &serde_json::Value,
-) -> Result<SystemPathBuf, JsonRpcResponse> {
+fn parse_system_path(path: &str, id: &serde_json::Value) -> Result<SystemPathBuf, JsonRpcResponse> {
     SystemPathBuf::from_path_buf(std::path::PathBuf::from(path)).map_err(|p| {
         JsonRpcResponse::error(
             id.clone(),
@@ -432,10 +429,7 @@ fn handle_get_type_registry(
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }
 
-fn handle_get_library_api(
-    request: &JsonRpcRequest,
-    db: &ProjectDatabase,
-) -> JsonRpcResponse {
+fn handle_get_library_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> JsonRpcResponse {
     let params: GetLibraryApiParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => {
@@ -479,14 +473,15 @@ fn handle_get_library_api(
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }
 
-fn handle_get_stdlib_api(
-    request: &JsonRpcRequest,
-    db: &ProjectDatabase,
-) -> JsonRpcResponse {
+fn handle_get_stdlib_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> JsonRpcResponse {
     let params: GetStdlibApiParams = match serde_json::from_value(request.params.clone()) {
         Ok(p) => p,
         Err(e) => {
-            return JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"));
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32602,
+                format!("Invalid params: {e}"),
+            );
         }
     };
 

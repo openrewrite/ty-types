@@ -463,6 +463,11 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        /// Canonical module of the known class (e.g. `dataclasses` for
+        /// `dataclasses.Field`, `typing` for `typing.Final`). Lets consumers
+        /// build the correct fully-qualified name instead of assuming `typing`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
     },
 
     #[serde(rename_all = "camelCase")]

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use rustc_hash::FxHashSet;
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
+use rustc_hash::FxHashSet;
 use ty_module_resolver::all_modules;
 use ty_project::ProjectDatabase;
 use ty_python_core::global_scope;
@@ -65,7 +65,10 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
                 if ext != "py" && ext != "pyi" {
                     continue;
                 }
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
                 if is_private_component(stem) {
                     continue;
                 }
@@ -119,10 +122,17 @@ fn collect_modules<'db>(
                 continue;
             }
             let type_id = registry.register(mwd.member.ty, db).type_id;
-            symbols.push(LibrarySymbolInfo { name: sym_name.to_string(), type_id });
+            symbols.push(LibrarySymbolInfo {
+                name: sym_name.to_string(),
+                type_id,
+            });
         }
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
-        modules.push(LibraryModuleInfo { name, file: rel, symbols });
+        modules.push(LibraryModuleInfo {
+            name,
+            file: rel,
+            symbols,
+        });
     }
     modules.sort_by(|a, b| a.name.cmp(&b.name));
     modules
@@ -180,7 +190,9 @@ pub fn extract_stdlib_api<'db>(
         if !requested.is_empty() && !requested.contains(top) {
             continue;
         }
-        let Some(file) = module.file(db) else { continue };
+        let Some(file) = module.file(db) else {
+            continue;
+        };
         items.push((name.clone(), file, name));
     }
     collect_modules(db, items, registry)

@@ -796,10 +796,13 @@ impl<'db> TypeRegistry<'db> {
 
             Type::KnownInstance(ki) => {
                 let display = self.display_string(ty, db);
-                let class_name = ki.class(db).name(db).to_string();
+                let known_class = ki.class(db);
+                let class_name = known_class.name(db).to_string();
+                let module_name = Some(known_class.canonical_module(db).as_str().to_string());
                 TypeDescriptor::KnownInstance {
                     display,
                     class_name,
+                    module_name,
                 }
             }
 

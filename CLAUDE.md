@@ -45,9 +45,9 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 
 | Kind | Description | Key Fields |
 |------|-------------|------------|
-| `instance` | Instance of a class (`str`, `int`, `MyClass()`) | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId` |
+| `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
-| `subclassOf` | Subclass-of constraint | `base` |
+| `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |
@@ -55,7 +55,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `callable` | Anonymous callable (`Callable[[int], str]`) | `parameters`, `returnType` |
 | `boundMethod` | Bound method (`obj.method`) | `name`, `className`, `moduleName`, `typeParameters`, `parameters`, `returnType` |
 | `wrapperDescriptor` | Descriptor wrapper (`__get__`, `__set__`) | `descriptorKind`, `parameters`, `returnType` |
-| `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`) | `className` |
+| `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`, `functools.partial(...)`, `range(...)`) | `className`, `knownInstanceKind`, `isNonEmpty`, `wrappedType`, `parameters`, `returnType` |
 | `intLiteral` | Literal int | `value` |
 | `boolLiteral` | Literal bool | `value` |
 | `stringLiteral` | Literal string | `value` |
@@ -65,9 +65,9 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `dynamic` | `Any`, `Unknown`, etc. | `dynamicKind` |
 | `never` | Bottom type | — |
 | `truthy` / `falsy` | Truthiness narrowing | — |
-| `typeVar` | Type variable in scope | `name`, `typevarKind`, `bound`, `constraints`, `defaultType` |
+| `typeVar` | Type variable in scope; `typevarKind` is one of `TypeVar`, `ParamSpec`, `TypeVarTuple`, `Self`, `TypeAlias` | `name`, `typevarKind`, `bound`, `constraints`, `defaultType` |
 | `module` | Module literal | `moduleName` |
-| `typeAlias` | Type alias (PEP 695 or legacy) | `name`, `valueType`, `typeParameters` |
+| `typeAlias` | Type alias (PEP 695 or legacy) | `name`, `qualifiedName`, `valueType`, `typeParameters` |
 | `typedDict` | TypedDict | `name`, `fields`, `closed`, `extraItems` |
 | `typeIs` / `typeGuard` | Type narrowing returns | `narrowedType` / `guardedType` |
 | `newType` | NewType wrapper | `name`, `baseType` |

@@ -1148,3 +1148,255 @@ fn test_non_paramspec_signature_has_no_flags() {
         );
     }
 }
+
+#[test]
+fn test_typevar_tuple_kind() {
+    // Both the legacy `TypeVarTuple("Ts")` and PEP 695 `[*Us]` spellings
+    // collapse to the same typevarKind.
+    let dir = create_test_project(&[(
+        "vt.py",
+        "from typing import TypeVarTuple, Unpack\n\
+         Ts = TypeVarTuple(\"Ts\")\n\
+         def legacy(*args: Unpack[Ts]) -> tuple[Unpack[Ts]]: ...\n\
+         def pep695[*Us](*args: *Us) -> tuple[*Us]: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("vt.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    for name in ["Ts", "Us"] {
+        let tv = types
+            .values()
+            .find(|t| t["kind"] == "typeVar" && t["name"] == name)
+            .unwrap_or_else(|| panic!("should have typevar '{name}'"));
+        assert_eq!(
+            tv["typevarKind"], "TypeVarTuple",
+            "typevar '{name}' should be a TypeVarTuple, got {tv:?}"
+        );
+    }
+}
+
+#[test]
+fn test_subclass_of_protocol() {
+    // `type[SomeProtocol]` reports the protocol's own class as its base,
+    // and never the subclassOf descriptor itself.
+    let dir = create_test_project(&[(
+        "sp.py",
+        "from typing import Protocol\n\
+         class Proto(Protocol):\n\
+         \x20   def meth(self) -> int: ...\n\
+         def takes(c: type[Proto]) -> None: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("sp.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let (id, subclass_of) = types
+        .iter()
+        .find(|(_, t)| t["kind"] == "subclassOf" && t["display"] == "type[Proto]")
+        .expect("should have subclassOf 'type[Proto]'");
+    let base_id = subclass_of["base"].as_u64().expect("base") as u32;
+    assert_ne!(
+        &base_id.to_string(),
+        id,
+        "subclassOf base must not point at itself"
+    );
+
+    let base = types.get(&base_id.to_string()).expect("base descriptor");
+    assert_eq!(base["kind"], "classLiteral");
+    assert_eq!(base["className"], "Proto");
+}
+
+#[test]
+fn test_known_instance_kind_and_payloads() {
+    // knownInstanceKind distinguishes singletons that share a class, and the
+    // functools.partial / range variants carry their payloads.
+    let dir = create_test_project(&[(
+        "ki.py",
+        "import functools\n\
+         def base(a: int, b: str, c: float) -> bytes: ...\n\
+         p = functools.partial(base, 1)\n\
+         non_empty = range(1, 10)\n\
+         empty = range(0)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("ki.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let partial = types
+        .values()
+        .find(|t| t["kind"] == "knownInstance" && t["knownInstanceKind"] == "FunctoolsPartial")
+        .expect("should have a FunctoolsPartial knownInstance");
+    assert_eq!(partial["className"], "partial");
+    assert!(
+        partial.get("wrappedType").is_some(),
+        "partial should carry the wrapped callable: {partial:?}"
+    );
+    // `base` takes three parameters; binding `1` leaves `b` and `c`.
+    let params = partial["parameters"].as_array().expect("parameters array");
+    assert_eq!(
+        params
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["b", "c"]
+    );
+
+    let emptiness: Vec<bool> = types
+        .values()
+        .filter(|t| t["kind"] == "knownInstance" && t["knownInstanceKind"] == "Range")
+        .filter_map(|t| t["isNonEmpty"].as_bool())
+        .collect();
+    assert!(
+        emptiness.contains(&true) && emptiness.contains(&false),
+        "expected both a non-empty and an empty range, got {emptiness:?}"
+    );
+}
+
+#[test]
+fn test_type_alias_qualified_name() {
+    // A type alias reports the dotted path of its enclosing modules and classes.
+    let dir = create_test_project(&[(
+        "ta.py",
+        "type Top[T] = list[T]\n\
+         class Outer:\n\
+         \x20   type Nested = set[int]\n\
+         def uses(a: Top[int], b: Outer.Nested) -> None: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("ta.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let find = |name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "typeAlias" && t["name"] == name)
+            .unwrap_or_else(|| panic!("should have type alias '{name}'"))
+            .clone()
+    };
+
+    assert_eq!(find("Top")["qualifiedName"], "ta.Top");
+    assert_eq!(find("Nested")["qualifiedName"], "ta.Outer.Nested");
+}
+
+#[test]
+fn test_tuple_elements() {
+    // Each tuple shape: fixed-length, homogeneous, unpacked TypeVarTuple, empty.
+    let dir = create_test_project(&[(
+        "tup.py",
+        "from typing import TypeVarTuple\n\
+         Ts = TypeVarTuple(\"Ts\")\n\
+         def fixed() -> tuple[int, str]: ...\n\
+         def homogeneous() -> tuple[int, ...]: ...\n\
+         def mixed(*args: *Ts) -> tuple[int, *Ts, bool]: ...\n\
+         def empty() -> tuple[()]: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("tup.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    // Returns (kind, className) per element, resolving each element's type id.
+    let elements_of = |display: &str| -> Vec<(String, String)> {
+        let tuple = types
+            .values()
+            .find(|t| t["kind"] == "instance" && t["display"] == display)
+            .unwrap_or_else(|| panic!("should have instance '{display}'"));
+        tuple["tupleElements"]
+            .as_array()
+            .unwrap_or_else(|| panic!("'{display}' should have tupleElements: {tuple:?}"))
+            .iter()
+            .map(|e| {
+                let id = e["typeId"].as_u64().expect("typeId") as u32;
+                let referenced = types.get(&id.to_string()).expect("element descriptor");
+                let name = referenced["className"]
+                    .as_str()
+                    .or_else(|| referenced["name"].as_str())
+                    .unwrap_or_default();
+                (
+                    e["kind"].as_str().expect("kind").to_string(),
+                    name.to_string(),
+                )
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        elements_of("tuple[int, str]"),
+        vec![
+            ("fixed".to_string(), "int".to_string()),
+            ("fixed".to_string(), "str".to_string()),
+        ]
+    );
+    assert_eq!(
+        elements_of("tuple[int, ...]"),
+        vec![("homogeneous".to_string(), "int".to_string())]
+    );
+    assert_eq!(
+        elements_of("tuple[int, *Ts@mixed, bool]"),
+        vec![
+            ("fixed".to_string(), "int".to_string()),
+            ("typeVarTuple".to_string(), "Ts".to_string()),
+            ("fixed".to_string(), "bool".to_string()),
+        ]
+    );
+
+    // Empty list, not absent: absence is reserved for non-tuples.
+    let empty = types
+        .values()
+        .find(|t| t["kind"] == "instance" && t["display"] == "tuple[()]")
+        .expect("should have instance 'tuple[()]'");
+    assert_eq!(empty["tupleElements"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn test_non_tuple_instance_has_no_tuple_elements() {
+    let dir = create_test_project(&[("nt.py", "def f() -> list[int]: ...\n")]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("nt.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let list = types
+        .values()
+        .find(|t| t["kind"] == "instance" && t["display"] == "list[int]")
+        .expect("should have instance 'list[int]'");
+    assert!(
+        list.get("tupleElements").is_none(),
+        "non-tuple instance should omit tupleElements: {list:?}"
+    );
+}

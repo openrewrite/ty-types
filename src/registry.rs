@@ -1,15 +1,17 @@
 use rustc_hash::FxHashMap;
-use ty_python_semantic::Db;
+use ty_module_resolver::ResolverFile;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
+use ty_python_semantic::types::tuple::{Tuple, VariableSegment};
 use ty_python_semantic::types::{
-    ClassLiteral, GenericContext, LiteralValueTypeKind, ParameterKind, Type, TypeVarKind,
-    TypeVarVariance,
+    ClassLiteral, GenericContext, KnownInstanceType, LiteralValueTypeKind, NominalInstanceType,
+    ParameterKind, ProgramEnvironment, SubclassOfInner, Type, TypeVarKind, TypeVarVariance,
 };
+use ty_python_semantic::{Db, Program};
 
 use crate::protocol::{
-    ClassMemberInfo, ParameterInfo, TypeDescriptor, TypeId, TypedDictExtraItemsInfo,
-    TypedDictFieldInfo,
+    ClassMemberInfo, ParameterInfo, TupleElementInfo, TypeDescriptor, TypeId,
+    TypedDictExtraItemsInfo, TypedDictFieldInfo,
 };
 
 /// A session-scoped registry that deduplicates types by identity.
@@ -23,6 +25,9 @@ pub struct TypeRegistry<'db> {
     /// Tracks all type IDs registered since the last `start_tracking()` call,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
+    /// A session covers a single project, hence a single program, so one
+    /// environment serves every descriptor built here.
+    env: ProgramEnvironment<'db>,
 }
 
 pub struct RegistrationResult {
@@ -31,12 +36,13 @@ pub struct RegistrationResult {
 }
 
 impl<'db> TypeRegistry<'db> {
-    pub fn new() -> Self {
+    pub fn new(program: Program<'db>) -> Self {
         Self {
             type_to_id: FxHashMap::default(),
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
             tracked_new_ids: Vec::new(),
+            env: ProgramEnvironment::from_program(program),
         }
     }
 
@@ -98,11 +104,12 @@ impl<'db> TypeRegistry<'db> {
     }
 
     fn resolve_module_name(&self, db: &'db dyn Db, file: ruff_db::files::File) -> Option<String> {
-        ty_module_resolver::file_to_module(db, file).map(|m| m.name(db).to_string())
+        let resolver_file = ResolverFile::new(db, file, self.env.resolver_environment(db));
+        ty_module_resolver::file_to_module(db, resolver_file).map(|m| m.name(db).to_string())
     }
 
     fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
-        Some(format!("{}", ty.display(db)))
+        Some(format!("{}", ty.display(db, &self.env)))
     }
 
     fn build_type_parameters(
@@ -227,16 +234,90 @@ impl<'db> TypeRegistry<'db> {
         self.build_params_from_signature(sig, db)
     }
 
+    /// Collapses the legacy and PEP 695 spellings of each kind: consumers care
+    /// which kind of type variable it is, not how it was declared.
     fn typevar_kind_str(kind: TypeVarKind) -> &'static str {
         match kind {
-            TypeVarKind::Legacy | TypeVarKind::Pep695 => "TypeVar",
+            TypeVarKind::LegacyTypeVar | TypeVarKind::Pep695TypeVar => "TypeVar",
             TypeVarKind::TypingSelf => "Self",
-            TypeVarKind::ParamSpec | TypeVarKind::Pep695ParamSpec => "ParamSpec",
+            TypeVarKind::LegacyParamSpec | TypeVarKind::Pep695ParamSpec => "ParamSpec",
+            TypeVarKind::LegacyTypeVarTuple | TypeVarKind::Pep695TypeVarTuple => "TypeVarTuple",
             TypeVarKind::Pep613Alias => "TypeAlias",
         }
     }
 
+    /// Covers tuple subclasses as well as `tuple` itself, since their spec comes
+    /// from the MRO rather than the class's own specialization.
+    fn build_tuple_elements(
+        &mut self,
+        instance: NominalInstanceType<'db>,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+    ) -> Option<Vec<TupleElementInfo>> {
+        let spec = instance.tuple_spec(db, env)?;
+
+        Some(match spec.as_ref() {
+            Tuple::Fixed(tuple) => self.register_fixed_elements(tuple.all_elements(), db),
+            Tuple::Variable(tuple) => {
+                let mut elements = self.register_fixed_elements(tuple.prefix_elements(), db);
+                let (variable_ty, kind) = match tuple.variable() {
+                    VariableSegment::Homogeneous(element) => (element, "homogeneous"),
+                    VariableSegment::TypeVarTuple(tv) => (Type::TypeVar(tv), "typeVarTuple"),
+                };
+                elements.push(TupleElementInfo {
+                    type_id: self.register_component(variable_ty, db),
+                    kind,
+                });
+                elements.extend(self.register_fixed_elements(tuple.suffix_elements(), db));
+                elements
+            }
+        })
+    }
+
+    fn register_fixed_elements(
+        &mut self,
+        elements: &[Type<'db>],
+        db: &'db dyn Db,
+    ) -> Vec<TupleElementInfo> {
+        elements
+            .iter()
+            .map(|&element| TupleElementInfo {
+                type_id: self.register_component(element, db),
+                kind: "fixed",
+            })
+            .collect()
+    }
+
+    fn known_instance_kind_str(ki: KnownInstanceType<'db>) -> &'static str {
+        match ki {
+            KnownInstanceType::SubscriptedProtocol(_) => "SubscriptedProtocol",
+            KnownInstanceType::SubscriptedGeneric(_) => "SubscriptedGeneric",
+            KnownInstanceType::TypeVar(_) => "TypeVar",
+            KnownInstanceType::TypeAliasType(_) => "TypeAliasType",
+            KnownInstanceType::Deprecated(_) => "Deprecated",
+            KnownInstanceType::Field(_) => "Field",
+            KnownInstanceType::ConstraintSet(_) => "ConstraintSet",
+            KnownInstanceType::ConstraintSetSolution(_) => "ConstraintSetSolution",
+            KnownInstanceType::GenericContext(_) => "GenericContext",
+            KnownInstanceType::Specialization(_) => "Specialization",
+            KnownInstanceType::UnionType(_) => "UnionType",
+            KnownInstanceType::Literal(_) => "Literal",
+            KnownInstanceType::Annotated(_) => "Annotated",
+            KnownInstanceType::TypeGenericAlias(_) => "TypeGenericAlias",
+            KnownInstanceType::Callable(_) => "Callable",
+            KnownInstanceType::LiteralStringAlias(_) => "LiteralStringAlias",
+            KnownInstanceType::NewType(_) => "NewType",
+            KnownInstanceType::Sentinel(_) => "Sentinel",
+            KnownInstanceType::NamedTupleSpec(_) => "NamedTupleSpec",
+            KnownInstanceType::FunctoolsPartial(_) => "FunctoolsPartial",
+            KnownInstanceType::Range { .. } => "Range",
+            KnownInstanceType::FunctoolsPartialCall(_) => "FunctoolsPartialCall",
+        }
+    }
+
     fn build_descriptor(&mut self, ty: Type<'db>, db: &'db dyn Db) -> TypeDescriptor {
+        let env = self.env.clone();
+        let python_version = env.python_version(db);
         match ty {
             Type::Dynamic(dynamic) => {
                 let display = self.display_string(ty, db);
@@ -266,7 +347,7 @@ impl<'db> TypeRegistry<'db> {
                         value: s.value(db).to_string(),
                     },
                     LiteralValueTypeKind::Bytes(_) => {
-                        let value = format!("{}", ty.display(db));
+                        let value = format!("{}", ty.display(db, &env));
                         TypeDescriptor::BytesLiteral { display, value }
                     }
                     LiteralValueTypeKind::LiteralString => {
@@ -317,14 +398,14 @@ impl<'db> TypeRegistry<'db> {
 
             Type::NominalInstance(instance) => {
                 let display = self.display_string(ty, db);
-                let cl = instance.class_literal(db);
+                let cl = instance.class_literal(db, &env);
                 let class_name = cl.name(db).to_string();
-                let module_name = instance.class_module_name(db).map(|m| m.to_string());
+                let module_name = instance.class_module_name(db, &env).map(|m| m.to_string());
 
                 let supertypes = self.supertypes_from_class_literal(cl, db);
 
                 // Extract type arguments from specialization
-                let class_type = instance.class(db);
+                let class_type = instance.class(db, &env);
                 let type_args: Vec<TypeId> = class_type
                     .static_class_literal(db)
                     .and_then(|(_, spec)| spec)
@@ -339,6 +420,8 @@ impl<'db> TypeRegistry<'db> {
                 // Register the class literal as a component
                 let class_id = Some(self.register_component(Type::ClassLiteral(cl), db));
 
+                let tuple_elements = self.build_tuple_elements(instance, db, &env);
+
                 TypeDescriptor::Instance {
                     display,
                     class_name,
@@ -346,19 +429,20 @@ impl<'db> TypeRegistry<'db> {
                     supertypes,
                     type_args,
                     class_id,
+                    tuple_elements,
                 }
             }
 
             Type::ProtocolInstance(instance) => {
                 let display = self.display_string(ty, db);
-                if let Some(nominal) = instance.to_nominal_instance() {
-                    let cl = nominal.class_literal(db);
+                if let Some(nominal) = instance.nominal_origin_instance(db) {
+                    let cl = nominal.class_literal(db, &env);
                     let class_name = cl.name(db).to_string();
-                    let module_name = nominal.class_module_name(db).map(|m| m.to_string());
+                    let module_name = nominal.class_module_name(db, &env).map(|m| m.to_string());
 
                     let supertypes = self.supertypes_from_class_literal(cl, db);
 
-                    let class_type = nominal.class(db);
+                    let class_type = nominal.class(db, &env);
                     let type_args: Vec<TypeId> = class_type
                         .static_class_literal(db)
                         .and_then(|(_, spec)| spec)
@@ -372,6 +456,8 @@ impl<'db> TypeRegistry<'db> {
 
                     let class_id = Some(self.register_component(Type::ClassLiteral(cl), db));
 
+                    let tuple_elements = self.build_tuple_elements(nominal, db, &env);
+
                     TypeDescriptor::Instance {
                         display,
                         class_name,
@@ -379,10 +465,11 @@ impl<'db> TypeRegistry<'db> {
                         supertypes,
                         type_args,
                         class_id,
+                        tuple_elements,
                     }
                 } else {
                     // Synthesized protocols have no class backing
-                    let class_name = format!("{}", ty.display(db));
+                    let class_name = format!("{}", ty.display(db, &env));
                     TypeDescriptor::Instance {
                         display,
                         class_name,
@@ -390,6 +477,7 @@ impl<'db> TypeRegistry<'db> {
                         supertypes: vec![],
                         type_args: vec![],
                         class_id: None,
+                        tuple_elements: None,
                     }
                 }
             }
@@ -460,13 +548,26 @@ impl<'db> TypeRegistry<'db> {
 
             Type::SubclassOf(subclass_of_ty) => {
                 let display = self.display_string(ty, db);
+                // Every arm registers the constraint's operand. `ty` already holds
+                // an id, so registering it here would point the descriptor at itself.
                 let base = match subclass_of_ty.subclass_of() {
-                    ty_python_semantic::types::SubclassOfInner::Class(class_ty) => {
+                    SubclassOfInner::Class(class_ty) => {
                         self.register_component(Type::ClassLiteral(class_ty.class_literal(db)), db)
                     }
-                    _ => {
-                        // Dynamic or TypeVar — register the full type as-is
-                        self.register_component(ty, db)
+                    // `type[SomeProtocol]` gets the same `classLiteral` base as a
+                    // nominal class. Synthesized protocols have no class to name.
+                    SubclassOfInner::Protocol(proto) => match proto.class_origin(db) {
+                        Some(proto_class) => self.register_component(
+                            Type::ClassLiteral(proto_class.class_literal(db)),
+                            db,
+                        ),
+                        None => self.register_component(Type::ProtocolInstance(proto), db),
+                    },
+                    SubclassOfInner::Dynamic(dynamic) => {
+                        self.register_component(Type::Dynamic(dynamic), db)
+                    }
+                    SubclassOfInner::TypeVar(bound_tv) => {
+                        self.register_component(Type::TypeVar(bound_tv), db)
                     }
                 };
                 TypeDescriptor::SubclassOf { display, base }
@@ -524,11 +625,11 @@ impl<'db> TypeRegistry<'db> {
                 // Derive class name from the self_instance type
                 let class_name = match bound.self_instance(db) {
                     Type::NominalInstance(inst) => {
-                        Some(inst.class_literal(db).name(db).to_string())
+                        Some(inst.class_literal(db, &env).name(db).to_string())
                     }
                     Type::ProtocolInstance(inst) => inst
-                        .to_nominal_instance()
-                        .map(|n| n.class_literal(db).name(db).to_string()),
+                        .nominal_origin_instance(db)
+                        .map(|n| n.class_literal(db, &env).name(db).to_string()),
                     _ => None,
                 };
                 let module_name = self.resolve_module_name(db, func.file(db));
@@ -547,8 +648,8 @@ impl<'db> TypeRegistry<'db> {
 
             Type::KnownBoundMethod(known_bound) => {
                 let display = self.display_string(ty, db);
-                let class_name = Some(known_bound.class().name(db).to_string());
-                let sigs: Vec<_> = known_bound.signatures(db).collect();
+                let class_name = Some(known_bound.class().name(python_version).to_string());
+                let sigs: Vec<_> = known_bound.signatures(db, &env).collect();
                 let (type_parameters, parameters, return_type) = sigs
                     .first()
                     .map(|sig| self.build_params_from_signature(sig, db))
@@ -591,16 +692,16 @@ impl<'db> TypeRegistry<'db> {
                 );
 
                 let upper_bound = typevar
-                    .upper_bound(db)
+                    .upper_bound(db, &env)
                     .map(|bound| self.register_component(bound, db));
 
                 let constraints: Vec<_> = typevar
-                    .constraints(db)
+                    .constraints(db, &env)
                     .map(|cs| cs.iter().map(|&c| self.register_component(c, db)).collect())
                     .unwrap_or_default();
 
                 let default_type = typevar
-                    .default_type(db)
+                    .default_type(db, &env)
                     .map(|dt| self.register_component(dt, db));
 
                 TypeDescriptor::TypeVar {
@@ -623,11 +724,13 @@ impl<'db> TypeRegistry<'db> {
                 } else {
                     Some(self.register_component(value_ty, db))
                 };
+                let qualified_name = Some(type_alias.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(type_alias.generic_context(db), db);
                 TypeDescriptor::TypeAlias {
                     display,
                     name,
+                    qualified_name,
                     value_type,
                     type_parameters,
                 }
@@ -717,17 +820,45 @@ impl<'db> TypeRegistry<'db> {
 
             Type::KnownInstance(ki) => {
                 let display = self.display_string(ty, db);
-                let class_name = ki.class(db).name(db).to_string();
+                let class_name = ki.class(db).name(python_version).to_string();
+
+                let is_non_empty = match ki {
+                    KnownInstanceType::Range { is_non_empty } => Some(is_non_empty),
+                    _ => None,
+                };
+
+                // `FunctoolsPartialCall` is the bound `__call__` of a partial, so
+                // both carry the same wrapped callable and residual signature.
+                let partial = match ki {
+                    KnownInstanceType::FunctoolsPartial(p)
+                    | KnownInstanceType::FunctoolsPartialCall(p) => Some(p),
+                    _ => None,
+                };
+                let wrapped_type =
+                    partial.map(|p| self.register_component(p.wrapped(db).inner(db), db));
+                let (parameters, return_type) = partial
+                    .and_then(|p| p.partial(db).signatures(db).iter().next())
+                    .map(|sig| {
+                        let (_, params, ret) = self.build_params_from_signature(sig, db);
+                        (params, ret)
+                    })
+                    .unwrap_or((vec![], None));
+
                 TypeDescriptor::KnownInstance {
                     display,
                     class_name,
+                    known_instance_kind: Self::known_instance_kind_str(ki),
+                    is_non_empty,
+                    wrapped_type,
+                    parameters,
+                    return_type,
                 }
             }
 
             Type::WrapperDescriptor(wrapper_kind) => {
                 let display = self.display_string(ty, db);
                 let descriptor_kind = format!("{wrapper_kind:?}");
-                let sigs: Vec<_> = wrapper_kind.signatures(db).collect();
+                let sigs: Vec<_> = wrapper_kind.signatures(db, &env).collect();
                 let (_type_params, parameters, return_type) = sigs
                     .first()
                     .map(|sig| self.build_params_from_signature(sig, db))

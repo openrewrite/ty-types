@@ -12,6 +12,7 @@ path = "src/main.rs"
 ty_project = { path = "ruff/crates/ty_project", default-features = false }
 ty_python_semantic = { path = "ruff/crates/ty_python_semantic" }
 ty_module_resolver = { path = "ruff/crates/ty_module_resolver" }
+ty_python_core = { path = "ruff/crates/ty_python_core" }
 ty_static = { path = "ruff/crates/ty_static" }
 ruff_db = { path = "ruff/crates/ruff_db", default-features = false, features = ["os"] }
 ruff_python_ast = { path = "ruff/crates/ruff_python_ast" }

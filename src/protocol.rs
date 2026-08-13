@@ -147,6 +147,16 @@ pub struct ParameterInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TupleElementInfo {
+    pub type_id: TypeId,
+    /// `fixed` for a single element, `homogeneous` for the `...` segment of
+    /// `tuple[int, ...]`, `typeVarTuple` for the `*Ts` of `tuple[int, *Ts]`.
+    /// The latter two each stand for an unknown number of elements.
+    pub kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClassMemberInfo {
     pub name: String,
     pub type_id: TypeId,
@@ -189,6 +199,12 @@ pub enum TypeDescriptor {
         type_args: Vec<TypeId>,
         #[serde(skip_serializing_if = "Option::is_none")]
         class_id: Option<TypeId>,
+        /// Element types in source order, for tuples and their subclasses.
+        /// `typeArgs` cannot express these: `tuple` has a single generic
+        /// parameter, so it conflates `tuple[int, str]` with `tuple[int | str, ...]`.
+        /// An empty list is a fixed-length empty tuple; absent means not a tuple.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tuple_elements: Option<Vec<TupleElementInfo>>,
     },
 
     // Class literal: type[MyClass]
@@ -388,6 +404,10 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        /// Dotted path of the enclosing modules and classes, followed by `name`
+        /// (e.g. `a.b.C.D`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         value_type: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -399,6 +419,20 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        /// Which singleton this is (`Range`, `FunctoolsPartial`, `TypeVar`, …).
+        /// `className` alone cannot distinguish them, since several share a class.
+        known_instance_kind: &'static str,
+        /// `range(...)` results whose emptiness ty could determine.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_non_empty: Option<bool>,
+        /// The callable a `functools.partial(...)` wraps.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wrapped_type: Option<TypeId>,
+        /// Signature left after a `functools.partial(...)` binds its arguments.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        parameters: Vec<ParameterInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        return_type: Option<TypeId>,
     },
 
     #[serde(rename_all = "camelCase")]

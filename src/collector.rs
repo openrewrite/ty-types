@@ -5,10 +5,12 @@ use ruff_python_ast::{
     self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor,
 };
 use ruff_text_size::Ranged;
+use ty_python_core::ProgramFile;
 use ty_python_semantic::types::call::CallArguments;
+use ty_python_semantic::types::call::bind::CheckTypesMode;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
-use ty_python_semantic::types::{ParameterKind, Type, TypeContext};
+use ty_python_semantic::types::{ParameterKind, ProgramEnvironment, Type, TypeContext};
 use ty_python_semantic::{Db, HasType, SemanticModel};
 
 use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
@@ -21,15 +23,18 @@ pub struct CollectionResult {
 
 pub fn collect_types<'db>(
     db: &'db dyn Db,
-    file: ruff_db::files::File,
+    file: ProgramFile<'db>,
     registry: &mut TypeRegistry<'db>,
 ) -> CollectionResult {
-    let ast = ruff_db::parsed::parsed_module(db, file).load(db);
+    let ast = ruff_db::parsed::parsed_module(db, file.python_file(db)).load(db);
 
     registry.start_tracking();
 
     let mut collector = TypeCollector {
         model: SemanticModel::new(db, file),
+        // Resolved up front: the environment is cloned per call expression, and a
+        // clone carries the resolution only if it has already happened.
+        env: ProgramEnvironment::from_program(file.program(db)),
         db,
         registry,
         nodes: Vec::new(),
@@ -47,6 +52,7 @@ pub fn collect_types<'db>(
 
 struct TypeCollector<'db, 'reg> {
     model: SemanticModel<'db>,
+    env: ProgramEnvironment<'db>,
     db: &'db dyn Db,
     registry: &'reg mut TypeRegistry<'db>,
     nodes: Vec<NodeAttribution>,
@@ -89,10 +95,14 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
     fn build_call_signature(&mut self, call_expr: &ast::ExprCall) -> Option<CallSignatureInfo> {
         let db = self.db;
+        let env = self.env.clone();
+        let env = &env;
 
         // Get the callable type from the function expression
         let func_type = call_expr.func.inferred_type(&self.model)?;
-        let callable_type = func_type.try_upcast_to_callable(db)?.into_type(db);
+        let callable_type = func_type
+            .try_upcast_to_callable(db, env)?
+            .into_type(db, env);
 
         // Build typed arguments so check_types can infer TypeVar specializations
         let call_arguments =
@@ -103,22 +113,25 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             });
 
         // Bind parameters and run type checking to resolve specializations
-        let mut bindings = callable_type
-            .bindings(db)
-            .match_parameters(db, &call_arguments);
+        let mut bindings =
+            callable_type
+                .bindings(db, env)
+                .match_parameters(db, env, &call_arguments);
         let constraints = ConstraintSetBuilder::new();
         let _ = bindings.check_types_impl(
             db,
+            env,
             &constraints,
             &call_arguments,
             TypeContext::default(),
             &[],
+            CheckTypesMode::Finalize,
         );
 
         // Pick the first matching overload (fallback to first overload)
         let binding = bindings.iter_flat().flatten().next()?;
 
-        let specialization = binding.specialization();
+        let specialization = binding.specialization(db);
 
         // Compute the specialized return type from the binding
         let return_type_id = Some(self.register_type(binding.return_type()));

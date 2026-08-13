@@ -15,7 +15,8 @@ use protocol::{
 use registry::TypeRegistry;
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
-use ty_project::ProjectDatabase;
+use ty_project::{Db as _, ProjectDatabase};
+use ty_python_core::ProgramFile;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -102,7 +103,8 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
         process::exit(1);
     });
 
-    let mut registry = TypeRegistry::new();
+    let program = db.project().program(&db);
+    let mut registry = TypeRegistry::new(program);
     let mut files = std::collections::HashMap::new();
 
     for file_arg in file_args {
@@ -122,7 +124,8 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
                 process::exit(1);
             });
 
-        let result = collector::collect_types(&db, file, &mut registry);
+        let result =
+            collector::collect_types(&db, ProgramFile::new(&db, file, program), &mut registry);
         files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
     }
 
@@ -219,7 +222,7 @@ fn run_session(
 ) -> bool {
     // The registry lives for the duration of this function,
     // sharing the 'db lifetime with the database reference.
-    let mut registry = TypeRegistry::new();
+    let mut registry = TypeRegistry::new(db.project().program(db));
 
     loop {
         let Some(line) = read_line(lines) else {
@@ -364,7 +367,8 @@ fn handle_get_types<'db>(
         }
     };
 
-    let result = collector::collect_types(db, file, registry);
+    let program_file = ProgramFile::new(db, file, db.project().program(db));
+    let result = collector::collect_types(db, program_file, registry);
 
     let mut types = result.new_types;
     if !params.include_display {

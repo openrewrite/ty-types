@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 use ty_module_resolver::ResolverFile;
+use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
 use ty_python_semantic::types::tuple::{Tuple, VariableSegment};
@@ -353,11 +354,15 @@ impl<'db> TypeRegistry<'db> {
                     LiteralValueTypeKind::LiteralString => {
                         TypeDescriptor::LiteralString { display }
                     }
-                    LiteralValueTypeKind::Enum(e) => TypeDescriptor::EnumLiteral {
-                        display,
-                        class_name: e.enum_class(db).name(db).to_string(),
-                        member_name: e.name(db).to_string(),
-                    },
+                    LiteralValueTypeKind::Enum(e) => {
+                        let enum_class = e.enum_class(db);
+                        TypeDescriptor::EnumLiteral {
+                            display,
+                            class_name: enum_class.name(db).to_string(),
+                            qualified_name: Some(enum_class.qualified_name(db).to_string()),
+                            member_name: e.name(db).to_string(),
+                        }
+                    }
                 }
             }
 
@@ -401,6 +406,7 @@ impl<'db> TypeRegistry<'db> {
                 let cl = instance.class_literal(db, &env);
                 let class_name = cl.name(db).to_string();
                 let module_name = instance.class_module_name(db, &env).map(|m| m.to_string());
+                let qualified_name = Some(cl.qualified_name(db).to_string());
 
                 let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -426,6 +432,7 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     class_name,
                     module_name,
+                    qualified_name,
                     supertypes,
                     type_args,
                     class_id,
@@ -439,6 +446,7 @@ impl<'db> TypeRegistry<'db> {
                     let cl = nominal.class_literal(db, &env);
                     let class_name = cl.name(db).to_string();
                     let module_name = nominal.class_module_name(db, &env).map(|m| m.to_string());
+                    let qualified_name = Some(cl.qualified_name(db).to_string());
 
                     let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -462,6 +470,7 @@ impl<'db> TypeRegistry<'db> {
                         display,
                         class_name,
                         module_name,
+                        qualified_name,
                         supertypes,
                         type_args,
                         class_id,
@@ -474,6 +483,7 @@ impl<'db> TypeRegistry<'db> {
                         display,
                         class_name,
                         module_name: None,
+                        qualified_name: None,
                         supertypes: vec![],
                         type_args: vec![],
                         class_id: None,
@@ -486,6 +496,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let module_name = self.resolve_module_name(db, class_literal.file(db));
+                let qualified_name = Some(class_literal.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(class_literal.generic_context(db), db);
                 let supertypes = self.supertypes_from_class_literal(class_literal, db);
@@ -510,6 +521,7 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     class_name,
                     module_name,
+                    qualified_name,
                     type_parameters,
                     supertypes,
                     members,
@@ -521,6 +533,8 @@ impl<'db> TypeRegistry<'db> {
                 let origin = alias.origin(db);
                 let class_name = origin.name(db).to_string();
                 let module_name = self.resolve_module_name(db, origin.file(db));
+                let qualified_name =
+                    Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
                 let supertypes: Vec<TypeId> = origin
                     .explicit_bases(db)
                     .iter()
@@ -540,6 +554,7 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     class_name,
                     module_name,
+                    qualified_name,
                     type_parameters: vec![],
                     supertypes,
                     members,
@@ -738,10 +753,11 @@ impl<'db> TypeRegistry<'db> {
 
             Type::TypedDict(typed_dict) => {
                 let display = self.display_string(ty, db);
-                let name = typed_dict
-                    .defining_class()
+                let defining_class = typed_dict.defining_class();
+                let name = defining_class
                     .map(|c| c.name(db).to_string())
                     .unwrap_or_default();
+                let qualified_name = defining_class.map(|c| c.qualified_name(db).to_string());
                 let schema = typed_dict.items(db);
                 let fields: Vec<TypedDictFieldInfo> = schema
                     .iter()
@@ -770,6 +786,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::TypedDict {
                     display,
                     name,
+                    qualified_name,
                     fields,
                     closed,
                     extra_items,
@@ -797,10 +814,22 @@ impl<'db> TypeRegistry<'db> {
             Type::NewTypeInstance(newtype) => {
                 let display = self.display_string(ty, db);
                 let name = newtype.name(db).to_string();
+                // A `NewType` has no defining class to ask, so walk its definition's
+                // enclosing scopes — the primitive `TypeAliasType::qualified_name`
+                // builds on. Definitions sit directly in that scope, so skip none.
+                let definition = newtype.definition(db);
+                let mut components = qualified_name_components_from_scope(
+                    db,
+                    definition.program_file(db),
+                    definition.file_scope(db),
+                    0,
+                );
+                components.push(name.clone());
                 let base_type = self.register_component(newtype.concrete_base_type(db), db);
                 TypeDescriptor::NewType {
                     display,
                     name,
+                    qualified_name: Some(components.join(".")),
                     base_type,
                 }
             }
@@ -876,6 +905,7 @@ impl<'db> TypeRegistry<'db> {
                 let enum_class = complement.enum_class(db);
                 let class_name = enum_class.name(db).to_string();
                 let module_name = self.resolve_module_name(db, enum_class.file(db));
+                let qualified_name = Some(enum_class.qualified_name(db).to_string());
                 let class_id = self.register_component(Type::ClassLiteral(enum_class), db);
                 let excluded_names = complement
                     .excluded_names(db)
@@ -891,6 +921,7 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     class_name,
                     module_name,
+                    qualified_name,
                     class_id,
                     excluded_names,
                     rest,

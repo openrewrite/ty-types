@@ -1304,6 +1304,202 @@ fn test_type_alias_qualified_name() {
 }
 
 #[test]
+fn test_nested_class_qualified_name() {
+    // `moduleName` plus `className` would call `nc.Outer.Inner` just `nc.Inner`.
+    let dir = create_test_project(&[(
+        "nc.py",
+        "class Outer:\n\
+         \x20   class Inner: ...\n\
+         class Top: ...\n\
+         def f(a: Outer.Inner, b: Top) -> type[Outer.Inner]: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("nc.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let find = |kind: &str, name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == kind && t["className"] == name)
+            .unwrap_or_else(|| panic!("should have {kind} '{name}'"))
+            .clone()
+    };
+
+    assert_eq!(find("instance", "Inner")["qualifiedName"], "nc.Outer.Inner");
+    assert_eq!(
+        find("classLiteral", "Inner")["qualifiedName"],
+        "nc.Outer.Inner"
+    );
+    // A top-level class keeps the plain `module.Class` form.
+    assert_eq!(find("instance", "Top")["qualifiedName"], "nc.Top");
+    assert_eq!(find("classLiteral", "Top")["qualifiedName"], "nc.Top");
+}
+
+#[test]
+fn test_enum_qualified_name() {
+    // Each enum needs two or more members: ty collapses a single-member enum to
+    // its instance type, which yields no `enumLiteral` at all.
+    let dir = create_test_project(&[(
+        "en.py",
+        "import enum\n\
+         class Color(enum.Enum):\n\
+         \x20   RED = 1\n\
+         \x20   GREEN = 2\n\
+         class Outer:\n\
+         \x20   class Shade(enum.Enum):\n\
+         \x20       DARK = 1\n\
+         \x20       LIGHT = 2\n\
+         r = Color.RED\n\
+         d = Outer.Shade.DARK\n\
+         def narrow(x: Color) -> None:\n\
+         \x20   if x is not Color.RED:\n\
+         \x20       reveal_type(x)\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("en.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let find = |kind: &str, name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == kind && t["className"] == name)
+            .unwrap_or_else(|| panic!("should have {kind} '{name}'"))
+            .clone()
+    };
+
+    assert_eq!(find("enumLiteral", "Color")["qualifiedName"], "en.Color");
+    assert_eq!(
+        find("enumLiteral", "Shade")["qualifiedName"],
+        "en.Outer.Shade"
+    );
+
+    let complement = find("enumComplement", "Color");
+    assert_eq!(complement["moduleName"], "en");
+    assert_eq!(complement["qualifiedName"], "en.Color");
+}
+
+#[test]
+fn test_typed_dict_qualified_name() {
+    let dir = create_test_project(&[(
+        "tdq.py",
+        "from typing import TypedDict\n\
+         class Movie(TypedDict):\n\
+         \x20   name: str\n\
+         class Outer:\n\
+         \x20   class Book(TypedDict):\n\
+         \x20       title: str\n\
+         def f(a: Movie, b: Outer.Book) -> None: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("tdq.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let find = |name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "typedDict" && t["name"] == name)
+            .unwrap_or_else(|| panic!("should have typedDict '{name}'"))
+            .clone()
+    };
+
+    assert_eq!(find("Movie")["qualifiedName"], "tdq.Movie");
+    assert_eq!(find("Book")["qualifiedName"], "tdq.Outer.Book");
+}
+
+#[test]
+fn test_same_named_typed_dicts_in_different_modules_stay_distinct() {
+    let dir = create_test_project(&[
+        (
+            "a.py",
+            "from typing import TypedDict\n\
+             class Movie(TypedDict):\n\
+             \x20   name: str\n",
+        ),
+        (
+            "b.py",
+            "from typing import TypedDict\n\
+             class Movie(TypedDict):\n\
+             \x20   title: str\n",
+        ),
+        (
+            "uses.py",
+            "import a\n\
+             import b\n\
+             def f(x: a.Movie, y: b.Movie) -> None: ...\n",
+        ),
+    ]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("uses.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let mut qualified: Vec<&str> = types
+        .values()
+        .filter(|t| t["kind"] == "typedDict" && t["name"] == "Movie")
+        .map(|t| t["qualifiedName"].as_str().expect("qualifiedName"))
+        .collect();
+    qualified.sort_unstable();
+
+    assert_eq!(qualified, vec!["a.Movie", "b.Movie"]);
+}
+
+#[test]
+fn test_new_type_qualified_name() {
+    let dir = create_test_project(&[(
+        "nt.py",
+        "from typing import NewType\n\
+         UserId = NewType(\"UserId\", int)\n\
+         class Outer:\n\
+         \x20   Tag = NewType(\"Tag\", str)\n\
+         u = UserId(1)\n\
+         t = Outer.Tag(\"x\")\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("nt.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+
+    let find = |name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "newType" && t["name"] == name)
+            .unwrap_or_else(|| panic!("should have newType '{name}'"))
+            .clone()
+    };
+
+    assert_eq!(find("UserId")["qualifiedName"], "nt.UserId");
+    assert_eq!(find("Tag")["qualifiedName"], "nt.Outer.Tag");
+}
+
+#[test]
 fn test_tuple_elements() {
     // Each tuple shape: fixed-length, homogeneous, unpacked TypeVarTuple, empty.
     let dir = create_test_project(&[(

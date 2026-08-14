@@ -343,10 +343,10 @@ fn do_initialize(
     // `firstPartyRoot` takes precedence; `firstPartyModules` is ignored when it
     // is set. With neither, there is no boundary (classes are fully expanded).
     let boundary = if let Some(first_party_root) = &params.first_party_root {
-        Some(Boundary::UnderRoot(parse_system_path(
+        Some(Boundary::UnderRoots(vec![parse_system_path(
             first_party_root,
             &request.id,
-        )?))
+        )?]))
     } else if !params.first_party_modules.is_empty() {
         Some(Boundary::Modules(
             params.first_party_modules.into_iter().collect(),
@@ -441,17 +441,32 @@ fn handle_get_library_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> Jso
         }
     };
 
-    let root = match parse_system_path(&params.root, &request.id) {
-        Ok(p) => p,
-        Err(resp) => return resp,
+    let mut roots = Vec::new();
+    for root in params.root.iter().chain(params.roots.iter()) {
+        match parse_system_path(root, &request.id) {
+            Ok(p) => roots.push(p),
+            Err(resp) => return resp,
+        }
+    }
+    if roots.is_empty() {
+        return JsonRpcResponse::error(
+            request.id.clone(),
+            -32602,
+            "Invalid params: one of `root` or `roots` is required".to_string(),
+        );
+    }
+
+    let visibility = library::Visibility {
+        include_private_modules: params.include_private_modules,
+        include_non_exported_symbols: params.include_non_exported_symbols,
     };
 
     // Use a fresh, boundary-scoped registry per call (not the session registry):
     // boundary state is request-scoped, and library extraction must not share or
-    // pollute the session's getTypes type IDs. `root` is used as supplied by the
-    // caller; the caller is expected to pass a clean absolute path.
-    let mut registry = TypeRegistry::with_boundary_root(root.clone());
-    let modules = match library::extract_library_api(db, root.as_path(), &mut registry) {
+    // pollute the session's getTypes type IDs. Roots are used as supplied by the
+    // caller; the caller is expected to pass clean absolute paths.
+    let mut registry = TypeRegistry::with_boundary(Boundary::UnderRoots(roots.clone()));
+    let modules = match library::extract_library_api(db, &roots, visibility, &mut registry) {
         Ok(m) => m,
         Err(e) => {
             return JsonRpcResponse::error(

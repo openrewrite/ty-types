@@ -14,8 +14,15 @@ use crate::registry::TypeRegistry;
 struct DiscoveredModule {
     /// Absolute path to the chosen file (`.pyi` preferred over `.py`).
     abs: SystemPathBuf,
-    /// Path relative to the package root, e.g. "core.py".
+    /// Path relative to the root's parent, e.g. "mypkg/core.py".
     rel: String,
+}
+
+/// Which of the two visibility filters are relaxed for a request.
+#[derive(Clone, Copy, Default)]
+pub struct Visibility {
+    pub include_private_modules: bool,
+    pub include_non_exported_symbols: bool,
 }
 
 /// True for a path component that marks a private module/package by the
@@ -38,10 +45,30 @@ fn is_public_symbol(
 }
 
 /// Walk `root` for importable module files. `.pyi` wins over `.py` for the same
-/// module; files/dirs with an underscore-private path component are skipped.
-fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModule>> {
+/// module; unless `include_private` is set, files/dirs with an underscore-private
+/// path component are skipped. A root that is itself a module file yields that one
+/// module, taken as named regardless of the underscore convention.
+fn discover_module_files(
+    root: &SystemPath,
+    include_private: bool,
+) -> anyhow::Result<Vec<DiscoveredModule>> {
     let root_std = std::path::Path::new(root.as_str());
-    // key = module path relative to root WITHOUT extension; value = chosen file
+    // Relative paths carry the root's own name, so they are built against its parent.
+    let base = root_std.parent().unwrap_or(root_std);
+
+    if root_std.is_file() {
+        let rel = root_std
+            .strip_prefix(base)
+            .unwrap_or(root_std)
+            .to_string_lossy()
+            .into_owned();
+        return Ok(vec![DiscoveredModule {
+            abs: SystemPathBuf::from(root.as_str()),
+            rel,
+        }]);
+    }
+
+    // key = module path relative to base WITHOUT extension; value = chosen file
     let mut chosen: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut stack = vec![root_std.to_path_buf()];
 
@@ -54,7 +81,7 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
             let name = name.to_string_lossy();
 
             if file_type.is_dir() {
-                if name == "__pycache__" || is_private_component(&name) {
+                if name == "__pycache__" || (!include_private && is_private_component(&name)) {
                     continue;
                 }
                 stack.push(path);
@@ -69,10 +96,10 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or_default();
-                if is_private_component(stem) {
+                if !include_private && is_private_component(stem) {
                     continue;
                 }
-                let Ok(rel) = path.strip_prefix(root_std) else {
+                let Ok(rel) = path.strip_prefix(base) else {
                     continue;
                 };
                 let key = rel.with_extension("").to_string_lossy().into_owned();
@@ -91,7 +118,7 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
     let mut modules = Vec::new();
     for (_key, abs_std) in chosen {
         let rel = abs_std
-            .strip_prefix(root_std)
+            .strip_prefix(base)
             .unwrap_or(&abs_std)
             .to_string_lossy()
             .into_owned();
@@ -108,6 +135,7 @@ fn discover_module_files(root: &SystemPath) -> anyhow::Result<Vec<DiscoveredModu
 fn collect_modules<'db>(
     db: &'db ProjectDatabase,
     items: impl IntoIterator<Item = (String, ruff_db::files::File, String)>,
+    include_non_exported: bool,
     registry: &mut TypeRegistry<'db>,
 ) -> Vec<LibraryModuleInfo> {
     let mut modules = Vec::new();
@@ -118,7 +146,7 @@ fn collect_modules<'db>(
         let mut symbols = Vec::new();
         for mwd in all_end_of_scope_members(db, scope) {
             let sym_name = mwd.member.name.as_str();
-            if !is_public_symbol(sym_name, dunder_all) {
+            if !include_non_exported && !is_public_symbol(sym_name, dunder_all) {
                 continue;
             }
             let type_id = registry.register(mwd.member.ty, db).type_id;
@@ -138,30 +166,44 @@ fn collect_modules<'db>(
     modules
 }
 
-/// Extract the public API of the package rooted at `root`. `registry` should be
-/// constructed with `TypeRegistry::with_boundary_root(root)` so types defined outside
-/// the package collapse to `classRef`.
+/// Extract the public API of the distribution installed at `roots`. `registry`
+/// should be constructed with `Boundary::UnderRoots(roots)` so types defined
+/// outside them collapse to `classRef`.
 pub fn extract_library_api<'db>(
     db: &'db ProjectDatabase,
-    root: &SystemPath,
+    roots: &[SystemPathBuf],
+    visibility: Visibility,
     registry: &mut TypeRegistry<'db>,
 ) -> anyhow::Result<Vec<LibraryModuleInfo>> {
     let mut items = Vec::new();
+    let mut seen = FxHashSet::default();
 
     // Modules that ty cannot resolve to a dotted name (e.g. a stray file with no
     // reachable package chain) are silently skipped — they are not part of any
     // importable public API.
-    for discovered in discover_module_files(root)? {
-        let Ok(file) = system_path_to_file(db, discovered.abs.as_path()) else {
-            continue;
-        };
-        let Some(module) = ty_module_resolver::file_to_module(db, file) else {
-            continue;
-        };
-        items.push((module.name(db).to_string(), file, discovered.rel));
+    for root in roots {
+        for discovered in discover_module_files(root.as_path(), visibility.include_private_modules)?
+        {
+            let Ok(file) = system_path_to_file(db, discovered.abs.as_path()) else {
+                continue;
+            };
+            let Some(module) = ty_module_resolver::file_to_module(db, file) else {
+                continue;
+            };
+            // Nested or repeated roots can reach the same file twice.
+            if !seen.insert(file) {
+                continue;
+            }
+            items.push((module.name(db).to_string(), file, discovered.rel));
+        }
     }
 
-    Ok(collect_modules(db, items, registry))
+    Ok(collect_modules(
+        db,
+        items,
+        visibility.include_non_exported_symbols,
+        registry,
+    ))
 }
 
 /// Extract the public API of the standard library. `requested` is the set of
@@ -195,5 +237,5 @@ pub fn extract_stdlib_api<'db>(
         };
         items.push((name.clone(), file, name));
     }
-    collect_modules(db, items, registry)
+    collect_modules(db, items, false, registry)
 }

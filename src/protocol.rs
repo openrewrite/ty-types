@@ -80,8 +80,21 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetLibraryApiParams {
-    /// Absolute path to the installed package directory to extract.
-    pub root: String,
+    /// Single root, unioned with `roots`. Accepted for backward compatibility.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Absolute paths to the roots the distribution installs. Each is either a
+    /// package directory or a bare module file, and the boundary spans their union.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    /// Emit modules with an underscore-prefixed path component, which the
+    /// convention marks private.
+    #[serde(default)]
+    pub include_private_modules: bool,
+    /// Emit module-level symbols that `__all__` omits, or — with no `__all__` —
+    /// underscore-prefixed ones.
+    #[serde(default)]
+    pub include_non_exported_symbols: bool,
     #[serde(default = "default_true")]
     pub include_display: bool,
 }
@@ -129,7 +142,9 @@ pub struct LibrarySymbolInfo {
 pub struct LibraryModuleInfo {
     /// Dotted module FQN, e.g. "requests.sessions".
     pub name: String,
-    /// Module file path relative to the package root, e.g. "sessions.py".
+    /// Module file path relative to its root's parent, e.g. "requests/sessions.py".
+    /// Including the root's own name keeps same-named modules from sibling roots
+    /// (`mypy/main.py` vs `mypyc/main.py`) distinct.
     pub file: String,
     pub symbols: Vec<LibrarySymbolInfo>,
 }

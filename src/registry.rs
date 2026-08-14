@@ -15,8 +15,8 @@ use crate::protocol::{
 
 /// Bounds which class literals get fully expanded vs. emitted as `classRef`.
 pub enum Boundary {
-    /// Local iff the class's file is under this filesystem root (package extraction).
-    UnderRoot(SystemPathBuf),
+    /// Local iff the class's file is under any of these filesystem roots.
+    UnderRoots(Vec<SystemPathBuf>),
     /// Local iff the class's top-level module name is in this set (stdlib extraction).
     Modules(rustc_hash::FxHashSet<String>),
 }
@@ -62,9 +62,9 @@ impl<'db> TypeRegistry<'db> {
         }
     }
 
-    /// Bound class-literal expansion to a filesystem `root` (package extraction).
+    /// Bound class-literal expansion to a single filesystem `root`.
     pub fn with_boundary_root(root: SystemPathBuf) -> Self {
-        Self::with_boundary(Boundary::UnderRoot(root))
+        Self::with_boundary(Boundary::UnderRoots(vec![root]))
     }
 
     /// Bound class-literal expansion to a set of top-level module names
@@ -80,10 +80,10 @@ impl<'db> TypeRegistry<'db> {
             return false;
         };
         let local = match boundary {
-            Boundary::UnderRoot(root) => file
+            Boundary::UnderRoots(roots) => file
                 .path(db)
                 .as_system_path()
-                .is_some_and(|p| p.starts_with(root.as_path())),
+                .is_some_and(|p| roots.iter().any(|root| p.starts_with(root.as_path()))),
             Boundary::Modules(modules) => {
                 ty_module_resolver::file_to_module(db, file).is_some_and(|m| {
                     let name = m.name(db).to_string();

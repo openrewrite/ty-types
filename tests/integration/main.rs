@@ -99,6 +99,22 @@ fn get_library_api_request(root: &str, id: u64) -> String {
     .to_string()
 }
 
+/// `getLibraryApi` over a set of roots. `flags` names the boolean params to set;
+/// any omitted flag keeps its default.
+fn get_library_api_roots_request(roots: &[&str], flags: &[&str], id: u64) -> String {
+    let mut params = serde_json::json!({"roots": roots});
+    for flag in flags {
+        params[*flag] = serde_json::Value::Bool(true);
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getLibraryApi",
+        "params": params,
+        "id": id
+    })
+    .to_string()
+}
+
 #[test]
 fn test_initialize_and_shutdown() {
     let dir = create_test_project(&[]);
@@ -1251,7 +1267,7 @@ fn test_library_prefers_pyi_stub() {
         .iter()
         .find(|m| m["name"] == "mypkg.mod")
         .expect("mypkg.mod present");
-    assert_eq!(m["file"], "mod.pyi", "should choose the stub file");
+    assert_eq!(m["file"], "mypkg/mod.pyi", "should choose the stub file");
 
     let value = m["symbols"]
         .as_array()
@@ -1441,6 +1457,248 @@ fn test_library_all_keeps_underscore_reexport() {
     assert!(
         !syms.contains(&"NotExported"),
         "non-underscore name absent from __all__ dropped: {syms:?}"
+    );
+}
+
+/// Fixture shaped like a distribution that installs two top-level packages
+/// (mypy/mypyc): `otherpkg` references a class whose body lives in `mypkg`.
+fn cross_root_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        ("mypkg/models.py", "class Shared:\n    x: int = 0\n"),
+        ("otherpkg/__init__.py", ""),
+        (
+            "otherpkg/use.py",
+            "from mypkg.models import Shared\n\ndef make() -> Shared:\n    return Shared()\n",
+        ),
+    ])
+}
+
+#[test]
+fn test_library_multi_root_spans_boundary() {
+    let dir = cross_root_project();
+    let mypkg = dir.path().join("mypkg");
+    let otherpkg = dir.path().join("otherpkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(
+            &[mypkg.to_str().unwrap(), otherpkg.to_str().unwrap()],
+            &[],
+            2,
+        ),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+    let names: Vec<&str> = modules
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"mypkg.models") && names.contains(&"otherpkg.use"),
+        "both roots contribute modules: {names:?}"
+    );
+
+    let use_mod = modules
+        .iter()
+        .find(|m| m["name"] == "otherpkg.use")
+        .unwrap();
+    assert_eq!(use_mod["file"], "otherpkg/use.py");
+    let models_mod = modules
+        .iter()
+        .find(|m| m["name"] == "mypkg.models")
+        .unwrap();
+    assert_eq!(models_mod["file"], "mypkg/models.py");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    let shared = types
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Shared")
+        .expect("Shared should be a full classLiteral across the root union");
+    assert!(
+        shared["members"]
+            .as_array()
+            .map(|m| !m.is_empty())
+            .unwrap_or(false),
+        "Shared should carry members"
+    );
+    assert!(
+        !types
+            .values()
+            .any(|t| t["kind"] == "classRef" && t["className"] == "Shared"),
+        "Shared must not be a classRef when its root is in the set"
+    );
+}
+
+#[test]
+fn test_library_single_root_collapses_cross_root_class() {
+    // Negative control for test_library_multi_root_spans_boundary.
+    let dir = cross_root_project();
+    let otherpkg = dir.path().join("otherpkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(&[otherpkg.to_str().unwrap()], &[], 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    assert!(
+        types
+            .values()
+            .any(|t| t["kind"] == "classRef" && t["className"] == "Shared"),
+        "Shared should be a classRef when mypkg is outside the root set"
+    );
+    assert!(
+        !types
+            .values()
+            .any(|t| t["kind"] == "classLiteral" && t["className"] == "Shared"),
+        "Shared must not be expanded when mypkg is outside the root set"
+    );
+}
+
+#[test]
+fn test_library_file_root() {
+    // pytest installs a bare `py.py` alongside its packages; single-module
+    // distributions are the same shape.
+    let dir = create_test_project(&[
+        ("py.py", "class Bare:\n    value: int = 0\n"),
+        ("_six.py", "class Compat:\n    n: int = 0\n"),
+    ]);
+    let py = dir.path().join("py.py");
+    let six = dir.path().join("_six.py");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(&[py.to_str().unwrap(), six.to_str().unwrap()], &[], 2),
+        &shutdown_request(99),
+    ]);
+
+    let result = &responses[1]["result"];
+    let modules = result["modules"].as_array().expect("modules array");
+
+    let py_mod = modules
+        .iter()
+        .find(|m| m["name"] == "py")
+        .expect("file root should yield one module");
+    assert_eq!(py_mod["file"], "py.py");
+    let bare = py_mod["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Bare")
+        .expect("py should expose Bare");
+
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    let bare_id = bare["typeId"].as_u64().unwrap().to_string();
+    assert_eq!(types[&bare_id]["kind"], "classLiteral");
+
+    assert!(
+        modules.iter().any(|m| m["name"] == "_six"),
+        "an explicitly named file root is kept regardless of its name"
+    );
+}
+
+/// Fixture with one module excluded by the private-module filter and one symbol
+/// excluded by the `__all__` filter despite its public name.
+fn filtered_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "mypkg/public.py",
+            "__all__ = [\"Exported\"]\nclass Exported: pass\nclass NotExported: pass\n",
+        ),
+        ("mypkg/_private.py", "class Hidden: pass\n"),
+    ])
+}
+
+/// Module names, and the symbols of `mypkg.public`, from a `getLibraryApi` run
+/// over `filtered_project()` with `flags` enabled.
+fn filtered_run(flags: &[&str]) -> (Vec<String>, Vec<String>) {
+    let dir = filtered_project();
+    let pkg_root = dir.path().join("mypkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(&[pkg_root.to_str().unwrap()], flags, 2),
+        &shutdown_request(99),
+    ]);
+
+    let modules = responses[1]["result"]["modules"]
+        .as_array()
+        .expect("modules array")
+        .clone();
+    let names = modules
+        .iter()
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect();
+    let symbols = modules
+        .iter()
+        .find(|m| m["name"] == "mypkg.public")
+        .expect("mypkg.public present")["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap().to_string())
+        .collect();
+    (names, symbols)
+}
+
+#[test]
+fn test_library_visibility_filters_are_on_by_default() {
+    let (names, symbols) = filtered_run(&[]);
+    assert!(
+        !names.iter().any(|n| n == "mypkg._private"),
+        "private module dropped: {names:?}"
+    );
+    assert!(
+        !symbols.iter().any(|s| s == "NotExported"),
+        "name absent from __all__ dropped: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s == "Exported"),
+        "exported name kept: {symbols:?}"
+    );
+}
+
+#[test]
+fn test_library_include_private_modules() {
+    let (names, symbols) = filtered_run(&["includePrivateModules"]);
+    assert!(
+        names.iter().any(|n| n == "mypkg._private"),
+        "private module kept: {names:?}"
+    );
+    assert!(
+        !symbols.iter().any(|s| s == "NotExported"),
+        "the symbol filter is unaffected: {symbols:?}"
+    );
+}
+
+#[test]
+fn test_library_include_non_exported_symbols() {
+    let (names, symbols) = filtered_run(&["includeNonExportedSymbols"]);
+    assert!(
+        symbols.iter().any(|s| s == "NotExported"),
+        "non-exported symbol kept: {symbols:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "mypkg._private"),
+        "the module filter is unaffected: {names:?}"
+    );
+}
+
+#[test]
+fn test_library_include_everything() {
+    let (names, symbols) = filtered_run(&["includePrivateModules", "includeNonExportedSymbols"]);
+    assert!(
+        names.iter().any(|n| n == "mypkg._private"),
+        "private module kept: {names:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s == "NotExported"),
+        "non-exported symbol kept: {symbols:?}"
     );
 }
 

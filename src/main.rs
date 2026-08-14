@@ -17,7 +17,8 @@ use protocol::{
 use registry::{Boundary, TypeRegistry};
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
-use ty_project::ProjectDatabase;
+use ty_project::{Db as _, ProjectDatabase};
+use ty_python_core::ProgramFile;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -104,7 +105,8 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
         process::exit(1);
     });
 
-    let mut registry = TypeRegistry::new();
+    let program = db.project().program(&db);
+    let mut registry = TypeRegistry::new(program);
     let mut files = std::collections::HashMap::new();
 
     for file_arg in file_args {
@@ -124,7 +126,8 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
                 process::exit(1);
             });
 
-        let result = collector::collect_types(&db, file, &mut registry);
+        let result =
+            collector::collect_types(&db, ProgramFile::new(&db, file, program), &mut registry);
         files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
     }
 
@@ -224,9 +227,10 @@ fn run_session(
     // sharing the 'db lifetime with the database reference. When a first-party
     // boundary was supplied at initialize, classes outside it come back as
     // `classRef`; otherwise every class is fully expanded (default behavior).
+    let program = db.project().program(db);
     let mut registry = match boundary {
-        Some(b) => TypeRegistry::with_boundary(b),
-        None => TypeRegistry::new(),
+        Some(b) => TypeRegistry::with_boundary(program, b),
+        None => TypeRegistry::new(program),
     };
 
     loop {
@@ -401,7 +405,8 @@ fn handle_get_types<'db>(
         }
     };
 
-    let result = collector::collect_types(db, file, registry);
+    let program_file = ProgramFile::new(db, file, db.project().program(db));
+    let result = collector::collect_types(db, program_file, registry);
 
     let mut types = result.new_types;
     if !params.include_display {
@@ -465,8 +470,10 @@ fn handle_get_library_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> Jso
     // boundary state is request-scoped, and library extraction must not share or
     // pollute the session's getTypes type IDs. Roots are used as supplied by the
     // caller; the caller is expected to pass clean absolute paths.
-    let mut registry = TypeRegistry::with_boundary(Boundary::UnderRoots(roots.clone()));
-    let modules = match library::extract_library_api(db, &roots, visibility, &mut registry) {
+    let program = db.project().program(db);
+    let mut registry = TypeRegistry::with_boundary(program, Boundary::UnderRoots(roots.clone()));
+    let modules = match library::extract_library_api(db, program, &roots, visibility, &mut registry)
+    {
         Ok(m) => m,
         Err(e) => {
             return JsonRpcResponse::error(
@@ -503,13 +510,14 @@ fn handle_get_stdlib_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> Json
     let requested: rustc_hash::FxHashSet<String> = params.modules.into_iter().collect();
     // A subset request makes everything outside it a classRef; an empty request
     // means all stdlib is local, so no boundary cut is needed (full expansion).
+    let program = db.project().program(db);
     let mut registry = if requested.is_empty() {
-        TypeRegistry::new()
+        TypeRegistry::new(program)
     } else {
-        TypeRegistry::with_boundary_modules(requested.clone())
+        TypeRegistry::with_boundary_modules(program, requested.clone())
     };
 
-    let modules = library::extract_stdlib_api(db, &requested, &mut registry);
+    let modules = library::extract_stdlib_api(db, program, &requested, &mut registry);
 
     let mut types = registry.all_descriptors();
     if !params.include_display {

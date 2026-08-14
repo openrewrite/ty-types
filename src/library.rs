@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
 use rustc_hash::FxHashSet;
-use ty_module_resolver::all_modules;
+use ty_module_resolver::{ResolverFile, all_modules};
 use ty_project::ProjectDatabase;
-use ty_python_core::global_scope;
+use ty_python_core::{ProgramFile, global_scope};
+use ty_python_semantic::Program;
+use ty_python_semantic::types::ProgramEnvironment;
 use ty_python_semantic::types::list_members::all_end_of_scope_members;
 
 use crate::protocol::{LibraryModuleInfo, LibrarySymbolInfo};
@@ -134,14 +136,16 @@ fn discover_module_files(
 /// the registry, producing one `LibraryModuleInfo` per module.
 fn collect_modules<'db>(
     db: &'db ProjectDatabase,
+    program: Program<'db>,
     items: impl IntoIterator<Item = (String, ruff_db::files::File, String)>,
     include_non_exported: bool,
     registry: &mut TypeRegistry<'db>,
 ) -> Vec<LibraryModuleInfo> {
     let mut modules = Vec::new();
     for (name, file, rel) in items {
-        let scope = global_scope(db, file);
-        let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, file);
+        let program_file = ProgramFile::new(db, file, program);
+        let scope = global_scope(db, program_file);
+        let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, program_file);
 
         let mut symbols = Vec::new();
         for mwd in all_end_of_scope_members(db, scope) {
@@ -171,10 +175,13 @@ fn collect_modules<'db>(
 /// outside them collapse to `classRef`.
 pub fn extract_library_api<'db>(
     db: &'db ProjectDatabase,
+    program: Program<'db>,
     roots: &[SystemPathBuf],
     visibility: Visibility,
     registry: &mut TypeRegistry<'db>,
 ) -> anyhow::Result<Vec<LibraryModuleInfo>> {
+    let env = ProgramEnvironment::from_program(program);
+    let resolver_env = env.resolver_environment(db);
     let mut items = Vec::new();
     let mut seen = FxHashSet::default();
 
@@ -187,7 +194,8 @@ pub fn extract_library_api<'db>(
             let Ok(file) = system_path_to_file(db, discovered.abs.as_path()) else {
                 continue;
             };
-            let Some(module) = ty_module_resolver::file_to_module(db, file) else {
+            let resolver_file = ResolverFile::new(db, file, resolver_env);
+            let Some(module) = ty_module_resolver::file_to_module(db, resolver_file) else {
                 continue;
             };
             // Nested or repeated roots can reach the same file twice.
@@ -200,6 +208,7 @@ pub fn extract_library_api<'db>(
 
     Ok(collect_modules(
         db,
+        program,
         items,
         visibility.include_non_exported_symbols,
         registry,
@@ -212,11 +221,13 @@ pub fn extract_library_api<'db>(
 /// every stdlib module is local).
 pub fn extract_stdlib_api<'db>(
     db: &'db ProjectDatabase,
+    program: Program<'db>,
     requested: &FxHashSet<String>,
     registry: &mut TypeRegistry<'db>,
 ) -> Vec<LibraryModuleInfo> {
+    let env = ProgramEnvironment::from_program(program);
     let mut items = Vec::new();
-    for module in all_modules(db) {
+    for module in all_modules(db, env.resolver_environment(db)) {
         let is_stdlib = module
             .search_path(db)
             .is_some_and(|sp| sp.is_standard_library());
@@ -237,5 +248,5 @@ pub fn extract_stdlib_api<'db>(
         };
         items.push((name.clone(), file, name));
     }
-    collect_modules(db, items, false, registry)
+    collect_modules(db, program, items, false, registry)
 }

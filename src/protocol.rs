@@ -249,6 +249,10 @@ pub struct TypedDictExtraItemsInfo {
 
 // ─── Structured type descriptors ─────────────────────────────────────
 
+/// `qualifiedName`, wherever it appears below, is the dotted path of the
+/// enclosing modules and classes followed by the item's own name (e.g.
+/// `a.b.C.D`). It is the key that identifies a class: `moduleName` and
+/// `className` together cannot tell `a.b.C.D` apart from `a.b.D`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TypeDescriptor {
@@ -260,6 +264,9 @@ pub enum TypeDescriptor {
         class_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        /// Absent for synthesized protocols, which have no class to name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         supertypes: Vec<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -282,6 +289,8 @@ pub enum TypeDescriptor {
         class_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -420,6 +429,9 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        /// Names the enum class, not the member; `memberName` selects within it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         member_name: String,
     },
 
@@ -483,8 +495,6 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
-        /// Dotted path of the enclosing modules and classes, followed by `name`
-        /// (e.g. `a.b.C.D`).
         #[serde(skip_serializing_if = "Option::is_none")]
         qualified_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -524,6 +534,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         fields: Vec<TypedDictFieldInfo>,
         /// `true` when the TypedDict forbids undeclared keys (`closed=True`,
@@ -554,6 +566,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         base_type: TypeId,
     },
 
@@ -579,6 +593,8 @@ pub enum TypeDescriptor {
         class_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
         class_id: TypeId,
         excluded_names: Vec<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]

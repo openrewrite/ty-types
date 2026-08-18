@@ -188,6 +188,8 @@ Every type in the registry is a tagged object with a `"kind"` discriminator. All
 
 Fields marked with *"omitted when empty"* are not present in the JSON when their value is empty or null.
 
+`qualifiedName`, wherever it appears below, is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`.
+
 #### `instance`
 
 An object of a class (e.g. `int`, `str`, `MyClass()`).
@@ -196,6 +198,7 @@ An object of a class (e.g. `int`, `str`, `MyClass()`).
 |---|---|---|
 | `className` | `string` | Class name |
 | `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified class name; absent for synthesized protocols *(omitted when empty)* |
 | `supertypes` | `integer[]` | Resolved base class type IDs *(omitted when empty)* |
 | `typeArgs` | `integer[]` | Specialization args, e.g. `list[int]` → `[<int>]` *(omitted when empty)* |
 | `classId` | `integer` | Type ID of the corresponding `classLiteral` *(omitted when empty)* |
@@ -208,6 +211,7 @@ A class object itself (the value of `type[MyClass]`).
 |---|---|---|
 | `className` | `string` | Class name |
 | `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified class name *(omitted when empty)* |
 | `typeParameters` | `integer[]` | Generic type parameters (`T`, `U`, ...) *(omitted when empty)* |
 | `supertypes` | `integer[]` | Explicit base classes *(omitted when empty)* |
 | `members` | `ClassMemberInfo[]` | Directly defined class members *(omitted when empty)* |
@@ -298,6 +302,7 @@ No additional fields beyond `display`.
 | Field | Type | Description |
 |---|---|---|
 | `className` | `string` | Enum class name |
+| `qualifiedName` | `string` | Fully qualified name of the enum class, not the member *(omitted when empty)* |
 | `memberName` | `string` | Member name |
 
 #### `literalString`
@@ -326,12 +331,14 @@ A generic type variable.
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | Alias name |
+| `qualifiedName` | `string` | Fully qualified alias name *(omitted when empty)* |
 
 #### `typedDict`
 
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | TypedDict name |
+| `qualifiedName` | `string` | Fully qualified TypedDict name *(omitted when empty)* |
 | `fields` | `TypedDictFieldInfo[]` | Typed fields *(omitted when empty)* |
 
 `TypedDictFieldInfo`: `{ "name": string, "typeId": integer, "required": boolean, "readOnly": boolean }`
@@ -357,6 +364,7 @@ A `TypeGuard[T]` return type for type guard functions.
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | NewType name |
+| `qualifiedName` | `string` | Fully qualified NewType name *(omitted when empty)* |
 | `baseType` | `integer` | Underlying type ID |
 
 #### `specialForm`

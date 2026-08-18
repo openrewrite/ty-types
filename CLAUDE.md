@@ -51,8 +51,8 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 
 | Kind | Description | Key Fields |
 |------|-------------|------------|
-| `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
-| `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `typeParameters`, `supertypes`, `members` |
+| `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
+| `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
 | `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
@@ -67,7 +67,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `boolLiteral` | Literal bool | `value` |
 | `stringLiteral` | Literal string | `value` |
 | `bytesLiteral` | Literal bytes | `value` |
-| `enumLiteral` | Enum member | `className`, `memberName` |
+| `enumLiteral` | Enum member | `className`, `qualifiedName`, `memberName` |
 | `literalString` | `LiteralString` type | — |
 | `dynamic` | `Any`, `Unknown`, etc. | `dynamicKind` |
 | `never` | Bottom type | — |
@@ -75,12 +75,14 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `typeVar` | Type variable in scope; `typevarKind` is one of `TypeVar`, `ParamSpec`, `TypeVarTuple`, `Self`, `TypeAlias` | `name`, `typevarKind`, `bound`, `constraints`, `defaultType` |
 | `module` | Module literal | `moduleName` |
 | `typeAlias` | Type alias (PEP 695 or legacy) | `name`, `qualifiedName`, `valueType`, `typeParameters` |
-| `typedDict` | TypedDict | `name`, `fields`, `closed`, `extraItems` |
+| `typedDict` | TypedDict | `name`, `qualifiedName`, `fields`, `closed`, `extraItems` |
 | `typeIs` / `typeGuard` | Type narrowing returns | `narrowedType` / `guardedType` |
-| `newType` | NewType wrapper | `name`, `baseType` |
+| `newType` | NewType wrapper | `name`, `qualifiedName`, `baseType` |
 | `specialForm` | Typing special form | `name` |
 | `property` | Property descriptor | — |
-| `enumComplement` | Enum instance with one or more canonical members excluded (e.g. `Color & ~Literal[Color.RED]`) | `className`, `moduleName`, `classId`, `excludedNames`, `rest` |
+| `enumComplement` | Enum instance with one or more canonical members excluded (e.g. `Color & ~Literal[Color.RED]`) | `className`, `moduleName`, `qualifiedName`, `classId`, `excludedNames`, `rest` |
 | `other` | Fallback for unhandled types | — |
 
 All variants include an optional `display` field with ty's string representation.
+
+`qualifiedName` is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`) — the field to key a class by. See README.md for the per-variant field tables.

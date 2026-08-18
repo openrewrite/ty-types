@@ -148,9 +148,16 @@ fn collect_modules<'db>(
         let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, program_file);
 
         let mut symbols = Vec::new();
+        // Members arrive as all declarations followed by all bindings, so a
+        // declared-and-bound name yields two. Keeping the first gives the
+        // declared type precedence.
+        let mut seen = FxHashSet::default();
         for mwd in all_end_of_scope_members(db, scope) {
             let sym_name = mwd.member.name.as_str();
             if !include_non_exported && !is_public_symbol(sym_name, dunder_all) {
+                continue;
+            }
+            if !seen.insert(sym_name.to_string()) {
                 continue;
             }
             let type_id = registry.register(mwd.member.ty, db).type_id;

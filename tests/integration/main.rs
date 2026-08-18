@@ -1377,6 +1377,86 @@ fn test_library_boundary_classref() {
     assert!(int_ref, "int should appear as a classRef");
 }
 
+/// Module-level statements that both declare and bind a name, plus one that
+/// only binds.
+fn declared_and_bound_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "mypkg/m.py",
+            "import sys\n\nannotated: int = 1\nplain = 2\n\ndef func(a: int) -> str:\n    return str(a)\n\nclass Klass:\n    pass\n",
+        ),
+    ])
+}
+
+fn module_symbols(dir: &tempfile::TempDir) -> (Vec<String>, TypeMap) {
+    let pkg_root = dir.path().join("mypkg");
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    let module = result["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "mypkg.m")
+        .expect("mypkg.m")
+        .clone();
+    let names = module["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap().to_string())
+        .collect();
+    (names, types)
+}
+
+#[test]
+fn test_library_module_symbol_names_are_unique() {
+    let dir = declared_and_bound_project();
+    let (names, _) = module_symbols(&dir);
+
+    let mut distinct = names.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        names, distinct,
+        "each name should be emitted once: {names:?}"
+    );
+}
+
+#[test]
+fn test_library_symbol_carries_declared_type() {
+    let dir = declared_and_bound_project();
+    let pkg_root = dir.path().join("mypkg");
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_request(pkg_root.to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+    let result = &responses[1]["result"];
+    let types: TypeMap = serde_json::from_value(result["types"].clone()).unwrap();
+    let module = result["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "mypkg.m")
+        .expect("mypkg.m");
+    let annotated = module["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "annotated")
+        .expect("annotated symbol");
+    let id = annotated["typeId"].as_u64().unwrap().to_string();
+    // The declaration governs: `int`, not the bound `Literal[1]`.
+    assert_eq!(types[&id]["kind"], "instance");
+    assert_eq!(types[&id]["className"], "int");
+}
+
 #[test]
 fn test_library_cross_module_in_package_is_classliteral() {
     // A class defined in a sibling module and imported must remain a full

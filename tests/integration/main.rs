@@ -1559,6 +1559,58 @@ fn test_library_single_root_collapses_cross_root_class() {
     );
 }
 
+/// Nested variant of [`cross_root_project`]: `otherpkg` aliases `Outer.Inner`,
+/// whose FQN cannot be rebuilt from `moduleName` + `className` alone.
+fn nested_cross_root_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "mypkg/models.py",
+            "class Outer:\n    class Inner:\n        x: int = 0\n",
+        ),
+        ("otherpkg/__init__.py", ""),
+        (
+            "otherpkg/use.py",
+            "from mypkg.models import Outer\n\nAlias = Outer.Inner\n",
+        ),
+    ])
+}
+
+#[test]
+fn test_library_class_ref_qualified_name_joins_across_boundary() {
+    let dir = nested_cross_root_project();
+    let mypkg = dir.path().join("mypkg");
+    let otherpkg = dir.path().join("otherpkg");
+
+    let collapsed = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(&[otherpkg.to_str().unwrap()], &[], 2),
+        &shutdown_request(99),
+    ]);
+    let types: TypeMap = serde_json::from_value(collapsed[1]["result"]["types"].clone()).unwrap();
+    let class_ref = types
+        .values()
+        .find(|t| t["kind"] == "classRef" && t["className"] == "Inner")
+        .expect("Inner should be a classRef when mypkg is outside the root set");
+    assert_eq!(class_ref["qualifiedName"], "mypkg.models.Outer.Inner");
+
+    let expanded = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(
+            &[mypkg.to_str().unwrap(), otherpkg.to_str().unwrap()],
+            &[],
+            2,
+        ),
+        &shutdown_request(99),
+    ]);
+    let types: TypeMap = serde_json::from_value(expanded[1]["result"]["types"].clone()).unwrap();
+    let class_literal = types
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Inner")
+        .expect("Inner should be a classLiteral across the root union");
+    assert_eq!(class_literal["qualifiedName"], "mypkg.models.Outer.Inner");
+}
+
 #[test]
 fn test_library_file_root() {
     // pytest installs a bare `py.py` alongside its packages; single-module

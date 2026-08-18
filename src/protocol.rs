@@ -309,6 +309,8 @@ pub enum TypeDescriptor {
         class_name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
     },
 
     // type[C] — subclass-of

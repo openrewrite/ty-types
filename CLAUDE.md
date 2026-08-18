@@ -54,7 +54,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
-| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName` |
+| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName`, `qualifiedName` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |

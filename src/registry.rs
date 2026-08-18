@@ -554,10 +554,12 @@ impl<'db> TypeRegistry<'db> {
                     let display = self.display_string(ty, db);
                     let class_name = class_literal.name(db).to_string();
                     let module_name = self.resolve_module_name(db, cl_file);
+                    let qualified_name = Some(class_literal.qualified_name(db).to_string());
                     return TypeDescriptor::ClassRef {
                         display,
                         class_name,
                         module_name,
+                        qualified_name,
                     };
                 }
                 let display = self.display_string(ty, db);
@@ -603,10 +605,13 @@ impl<'db> TypeRegistry<'db> {
                     let display = self.display_string(ty, db);
                     let class_name = origin.name(db).to_string();
                     let module_name = self.resolve_module_name(db, origin_file);
+                    let qualified_name =
+                        Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
                     return TypeDescriptor::ClassRef {
                         display,
                         class_name,
                         module_name,
+                        qualified_name,
                     };
                 }
                 let display = self.display_string(ty, db);

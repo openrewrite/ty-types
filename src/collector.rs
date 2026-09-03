@@ -11,6 +11,7 @@ use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_semantic::types::call::CallArguments;
 use ty_python_semantic::types::call::bind::CheckTypesMode;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
+use ty_python_semantic::types::definition_resolution::find_symbol_in_scope;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
 use ty_python_semantic::types::{ParameterKind, ProgramEnvironment, Type, TypeContext};
@@ -39,6 +40,13 @@ pub fn catch_collect<R>(path: &str, f: impl FnOnce() -> R + UnwindSafe) -> Resul
         }
         error.to_diagnostic_message(Some(path))
     })
+}
+
+fn only_definition<'db>(resolved: ResolvedDefinition<'db>) -> Option<Definition<'db>> {
+    match resolved {
+        ResolvedDefinition::Definition(definition) => Some(definition),
+        _ => None,
+    }
 }
 
 pub struct CollectionResult {
@@ -141,7 +149,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
     /// Resolves a reference to the definition that binds it, through re-export chains.
     fn binding_info(&self, expr: &ast::Expr, inferred: Option<Type<'db>>) -> Option<BindingInfo> {
         let db = self.db;
-        let candidates = match expr {
+        let candidates: Vec<Definition<'db>> = match expr {
             ast::Expr::Name(name) => definitions_for_name(
                 &self.model,
                 name.id.as_str(),
@@ -150,25 +158,27 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             ),
             ast::Expr::Attribute(attribute) => definitions_for_attribute(&self.model, attribute),
             _ => return None,
-        };
-        let candidates: Vec<Definition<'db>> = candidates
-            .into_iter()
-            .filter_map(|resolved| match resolved {
-                ResolvedDefinition::Definition(definition) => Some(definition),
-                _ => None,
-            })
-            .collect();
+        }
+        .into_iter()
+        .filter_map(only_definition)
+        .collect();
 
         // A symbol bound under `if sys.platform == ...` yields one definition per
         // branch, in source order and unfiltered by reachability. The live branch is
-        // the one whose type is the type inferred at this reference. A lone candidate
-        // is that answer already, whatever its type.
+        // the one matching the type this file binds the symbol to, which every
+        // reference shares. A lone candidate is the answer already, whatever its type.
+        let matched = self
+            .bound_types_here(expr)
+            .unwrap_or_else(|| vec![inferred]);
         let definition = match candidates.as_slice() {
             [definition] => *definition,
             _ => candidates
                 .iter()
                 .copied()
-                .find(|definition| self.reference_types_of(*definition).contains(&inferred))
+                .find(|definition| {
+                    let types = self.reference_types_of(*definition);
+                    matched.iter().any(|ty| types.contains(ty))
+                })
                 .or_else(|| candidates.first().copied())?,
         };
 
@@ -176,6 +186,29 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             defined_in: self.module_name_of(definition.file(db))?,
             qualified_name: self.qualified_name_of(definition)?,
         })
+    }
+
+    /// The types the name carries at its binding in the reference's own scope, which
+    /// narrowing at the reference cannot reach.
+    ///
+    /// `None` where that scope does not bind it — a builtin, or a name from an
+    /// enclosing scope.
+    fn bound_types_here(&self, expr: &ast::Expr) -> Option<Vec<Option<Type<'db>>>> {
+        let db = self.db;
+        let ast::Expr::Name(name) = expr else {
+            return None;
+        };
+        let scope = self
+            .model
+            .scope(name.into())?
+            .to_scope_id(db, self.model.program_file());
+        let local = find_symbol_in_scope(db, scope, name.id.as_str());
+
+        let types: Vec<Option<Type<'db>>> = local
+            .iter()
+            .flat_map(|definition| self.reference_types_of(*definition))
+            .collect();
+        (!types.is_empty()).then_some(types)
     }
 
     /// The types a reference to `definition` can carry: its declared type where it

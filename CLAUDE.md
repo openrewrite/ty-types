@@ -100,4 +100,4 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 
 All variants include an optional `display` field with ty's string representation.
 
-`qualifiedName` is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`) — the field to key a class by. See README.md for the per-variant field tables.
+`qualifiedName` is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`) — the field to key a class by. A function scope appears as ty spells it (`a.<locals of function 'f'>.C`), so it is not safe to split on `.`. See README.md for the per-variant field tables.

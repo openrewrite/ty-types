@@ -1853,3 +1853,54 @@ fn one_shot_emits_the_files_it_could_analyze_and_reports_a_partial_run() {
         );
     }
 }
+
+#[test]
+fn a_narrowed_reference_still_reports_the_reachable_branch() {
+    // `isinstance` narrows `NAME` to `int` at the second reference, which is also
+    // what the dead `_win` branch declares.
+    let dir = create_test_project(&[
+        ("ty.toml", "[environment]\npython-platform = \"linux\"\n"),
+        ("pkg/_win.py", "NAME: int = 60\n"),
+        ("pkg/_posix.py", "NAME: int | str = 30\n"),
+        (
+            "pkg/__init__.py",
+            "import sys\nif sys.platform == \"win32\":\n    from ._win import NAME\nelse:\n    from ._posix import NAME\n",
+        ),
+        (
+            "main.py",
+            "from pkg import NAME\nif isinstance(NAME, int):\n    print(NAME)\n",
+        ),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "getTypes",
+            "params": {"file": "main.py", "includeBindings": true}, "id": 2
+        })
+        .to_string(),
+        &shutdown_request(99),
+    ]);
+
+    let nodes = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .expect("getTypes must answer")["result"]["nodes"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    let bindings: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprName")
+        .filter_map(|n| n["binding"]["qualifiedName"].as_str())
+        .filter(|q| q.ends_with(".NAME"))
+        .collect();
+
+    assert_eq!(
+        bindings,
+        vec!["pkg._posix.NAME", "pkg._posix.NAME"],
+        "both references must name the branch live on this platform"
+    );
+}

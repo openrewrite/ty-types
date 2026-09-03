@@ -51,6 +51,14 @@ Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
 
 A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
 
+### Backwards compatibility
+
+Clients — rewrite-python, moderne-cli's `PythonTypeMapping` — upgrade this binary on their own schedule, so treat the wire format as a published contract. Keep changes additive: a new request parameter takes `#[serde(default)]`, and a new response field is `Option` with `skip_serializing_if`, so a client that neither sends nor reads it sees the output it saw before. Where a feature costs real time or payload, put it behind a request flag that defaults off, as `includeDisplay` and `includeBindings` do.
+
+Removing a field, renaming one, changing its type, or changing what an existing one means all break clients and need a version bump. Releases are tagged `v0.0.N` and the workflow rewrites the placeholder `version = "0.0.0"`, so a breaking release means moving the minor — `v0.1.0` — rather than continuing the patch series.
+
+Confirm compatibility by running the previous binary and the new one over the same corpus and comparing. `files` and `types` are `HashMap`s that serialize in a different order on every run, so compare parsed JSON; a byte diff reports a difference either way and tells you nothing.
+
 ## TypeDescriptor Variants
 
 Each type in the registry is represented as a `TypeDescriptor` with a `kind` discriminator:

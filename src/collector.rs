@@ -106,11 +106,12 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         &mut self,
         node_kind: &'static str,
         expr: &ast::Expr,
+        inferred: Option<Type<'db>>,
         type_id: Option<TypeId>,
     ) {
         let binding = self
             .include_bindings
-            .then(|| self.binding_info(expr))
+            .then(|| self.binding_info(expr, inferred))
             .flatten();
         self.nodes.push(NodeAttribution {
             start: expr.range().start().into(),
@@ -123,7 +124,11 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
     }
 
     /// Resolves a reference to the definition that binds it, through re-export chains.
-    fn binding_info(&self, expr: &ast::Expr) -> Option<BindingInfo> {
+    fn binding_info(
+        &self,
+        expr: &ast::Expr,
+        inferred: Option<Type<'db>>,
+    ) -> Option<BindingInfo> {
         let db = self.db;
         let candidates = match expr {
             ast::Expr::Name(name) => definitions_for_name(
@@ -145,13 +150,16 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
         // A symbol bound under `if sys.platform == ...` yields one definition per
         // branch, in source order and unfiltered by reachability. The live branch is
-        // the one whose type is the type inferred at this reference.
-        let inferred = expr.inferred_type(&self.model);
-        let definition = candidates
-            .iter()
-            .copied()
-            .find(|definition| self.reference_types_of(*definition).contains(&inferred))
-            .or_else(|| candidates.first().copied())?;
+        // the one whose type is the type inferred at this reference. A lone candidate
+        // is that answer already, whatever its type.
+        let definition = match candidates.as_slice() {
+            [definition] => *definition,
+            _ => candidates
+                .iter()
+                .copied()
+                .find(|definition| self.reference_types_of(*definition).contains(&inferred))
+                .or_else(|| candidates.first().copied())?,
+        };
 
         Some(BindingInfo {
             defined_in: self.module_name_of(definition.file(db))?,
@@ -420,13 +428,13 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
                 let call_sig = self.build_call_signature(call_expr);
                 self.record_call_node(expr.range(), Some(type_id), call_sig);
             } else {
-                self.record_expr_node(node_kind, expr, Some(type_id));
+                self.record_expr_node(node_kind, expr, Some(ty), Some(type_id));
             }
         } else if let ast::Expr::Call(call_expr) = expr {
             let call_sig = self.build_call_signature(call_expr);
             self.record_call_node(expr.range(), None, call_sig);
         } else {
-            self.record_expr_node(node_kind, expr, None);
+            self.record_expr_node(node_kind, expr, None, None);
         }
 
         source_order::walk_expr(self, expr);

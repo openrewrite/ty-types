@@ -140,7 +140,7 @@ Each entry in the `nodes` array represents a typed AST node:
 | `nodeKind` | `string` | AST node kind (see below) |
 | `typeId` | `integer \| null` | Reference into the type registry |
 | `callSignature` | `CallSignatureInfo \| null` | Present only on `ExprCall` nodes |
-| `binding` | `BindingInfo` | Present on `ExprName` and `ExprAttribute` nodes, and only under `includeBindings` *(omitted when absent)* |
+| `binding` | `BindingInfo` | On `ExprName` and `ExprAttribute` nodes under `includeBindings`, where the reference resolves *(omitted otherwise)* |
 
 **Node kinds:** `StmtFunctionDef`, `StmtClassDef`, `StmtAssign`, `StmtFor`, `StmtWith`, `ExprCall`, `ExprBoolOp`, `ExprBinOp`, `ExprUnaryOp`, `ExprLambda`, `ExprIf`, `ExprDict`, `ExprSet`, `ExprListComp`, `ExprSetComp`, `ExprDictComp`, `ExprGenerator`, `ExprAwait`, `ExprYield`, `ExprYieldFrom`, `ExprCompare`, `ExprFString`, `ExprTString`, `ExprStringLiteral`, `ExprBytesLiteral`, `ExprNumberLiteral`, `ExprBooleanLiteral`, `ExprNoneLiteral`, `ExprEllipsisLiteral`, `ExprAttribute`, `ExprSubscript`, `ExprStarred`, `ExprName`, `ExprList`, `ExprTuple`, `ExprSlice`, `Parameter`, `ParameterWithDefault`, `Alias`
 
@@ -158,7 +158,9 @@ Where a referenced symbol is bound, following re-export chains to the original b
 | Field | Type | Description |
 |---|---|---|
 | `definedIn` | `string` | Module holding the binding |
-| `qualifiedName` | `string` | Dotted path including enclosing classes, e.g. `app.Holder.MAX`. `definedIn` says where the module part ends |
+| `qualifiedName` | `string` | Dotted path through the enclosing scopes, e.g. `app.Holder.MAX`. `definedIn` says where the module part ends |
+
+A reference resolves when the binding is a function, class, type alias, or plain or annotated assignment. Parameters, loop and `with` and `except` targets, walrus and comprehension bindings, and attributes assigned in a method body all yield no `binding`. Scopes other than modules and classes appear in `qualifiedName` as ty spells them, so a function-local binding reads `app.<locals of function 'f'>.x`.
 
 `moduleName` on a type descriptor is the module of the *value's* type — `builtins` for `SEP: str = "/"`, and absent entirely for `LIMIT = 5`. Binding is a property of the reference, which is why it is reported here rather than on the type.
 

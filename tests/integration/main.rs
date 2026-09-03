@@ -1692,19 +1692,24 @@ fn test_binding_qualified_name_carries_the_enclosing_class() {
     );
 }
 
-#[test]
-fn test_binding_picks_the_branch_matching_the_inferred_type() {
-    let dir = create_test_project(&[
-        ("pkg/_win.py", "TIMEOUT = 60\n"),
-        ("pkg/_posix.py", "TIMEOUT = 30\n"),
+/// Fixture: `NAME` bound in both arms of a `sys.platform` conditional, with the
+/// arms' bodies supplied by the caller. The platform is pinned so the `else` arm
+/// is the live one on every host.
+fn platform_conditional_project(win_body: &str, posix_body: &str) -> tempfile::TempDir {
+    create_test_project(&[
+        ("ty.toml", "[environment]\npython-platform = \"linux\"\n"),
+        ("pkg/_win.py", win_body),
+        ("pkg/_posix.py", posix_body),
         (
             "pkg/__init__.py",
-            "import sys\n\nif sys.platform == \"win32\":\n    from pkg._win import TIMEOUT\nelse:\n    from pkg._posix import TIMEOUT\n",
+            "import sys\n\nif sys.platform == \"win32\":\n    from pkg._win import NAME\nelse:\n    from pkg._posix import NAME\n",
         ),
-        ("main.py", "from pkg import TIMEOUT\n\nprint(TIMEOUT)\n"),
-    ]);
-    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+        ("main.py", "from pkg import NAME\n\nprint(NAME)\n"),
+    ])
+}
 
+fn assert_binds_to_posix_arm(dir: &tempfile::TempDir) {
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
     let responses = run_session(&[
         &initialize_request(dir.path().to_str().unwrap(), 1),
         &get_types_with_bindings_request("main.py", 2),
@@ -1712,12 +1717,27 @@ fn test_binding_picks_the_branch_matching_the_inferred_type() {
     ]);
     let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
 
-    // `_win` is the first branch in source order; the inferred `Literal[30]` is
-    // what makes `_posix` the right answer.
     assert_eq!(
-        binding_at(&nodes, &source, "ExprName", "TIMEOUT"),
-        serde_json::json!({"definedIn": "pkg._posix", "qualifiedName": "pkg._posix.TIMEOUT"}),
+        binding_at(&nodes, &source, "ExprName", "NAME"),
+        serde_json::json!({"definedIn": "pkg._posix", "qualifiedName": "pkg._posix.NAME"}),
     );
+}
+
+#[test]
+fn test_binding_picks_the_branch_matching_the_inferred_type() {
+    // `_win` is the first arm in source order; the inferred `Literal[30]` is what
+    // makes `_posix` the right answer.
+    assert_binds_to_posix_arm(&platform_conditional_project("NAME = 60\n", "NAME = 30\n"));
+}
+
+#[test]
+fn test_binding_matches_a_declared_type_against_the_reference() {
+    // The reference reads as the declared `int`, which no arm's *assigned* type
+    // (`Literal[60]`, `Literal[30]`) equals.
+    assert_binds_to_posix_arm(&platform_conditional_project(
+        "NAME = 60\n",
+        "NAME: int = 30\n",
+    ));
 }
 
 #[test]

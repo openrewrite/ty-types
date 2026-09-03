@@ -56,6 +56,14 @@ fn main() {
         process::exit(1);
     }
 
+    if serve && bindings {
+        eprintln!(
+            "Error: --bindings applies to one-shot mode; \
+             pass includeBindings on each getTypes request instead"
+        );
+        process::exit(1);
+    }
+
     if serve {
         run_serve();
     } else if !file_paths.is_empty() {

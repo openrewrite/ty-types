@@ -7,13 +7,13 @@ use ruff_python_ast::{
 use ruff_text_size::Ranged;
 use ty_python_core::ProgramFile;
 use ty_python_core::definition::{Definition, DefinitionKind};
-use ty_python_semantic::types::binding_type;
 use ty_python_semantic::types::call::CallArguments;
 use ty_python_semantic::types::call::bind::CheckTypesMode;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
 use ty_python_semantic::types::{ParameterKind, ProgramEnvironment, Type, TypeContext};
+use ty_python_semantic::types::{binding_type, inferred_declaration};
 use ty_python_semantic::{
     Db, HasType, ImportAliasResolution, ResolvedDefinition, SemanticModel,
     definitions_for_attribute, definitions_for_name,
@@ -145,12 +145,12 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
         // A symbol bound under `if sys.platform == ...` yields one definition per
         // branch, in source order and unfiltered by reachability. The live branch is
-        // the one whose binding type is the type inferred at this reference.
+        // the one whose type is the type inferred at this reference.
         let inferred = expr.inferred_type(&self.model);
         let definition = candidates
             .iter()
             .copied()
-            .find(|definition| self.binding_type_of(*definition) == inferred)
+            .find(|definition| self.reference_types_of(*definition).contains(&inferred))
             .or_else(|| candidates.first().copied())?;
 
         Some(BindingInfo {
@@ -159,17 +159,30 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         })
     }
 
+    /// The types a reference to `definition` can carry: its declared type where it
+    /// declares one (`LEVEL: int = 7` reads as `int`), and its assigned type
+    /// otherwise (`LEVEL = 7` reads as `Literal[7]`).
+    ///
     /// `binding_type` panics on a definition that declares without binding
     /// (`x: int` with no value, outside a stub), hence the category gate.
-    fn binding_type_of(&self, definition: Definition<'db>) -> Option<Type<'db>> {
+    fn reference_types_of(&self, definition: Definition<'db>) -> Vec<Option<Type<'db>>> {
         let db = self.db;
         let in_stub = definition.file(db).path(db).extension() == Some("pyi");
         let module = ruff_db::parsed::parsed_module(db, definition.python_file(db)).load(db);
-        definition
-            .kind(db)
-            .category(in_stub, &module)
-            .is_binding()
-            .then(|| binding_type(db, definition))
+        let category = definition.kind(db).category(in_stub, &module);
+
+        let mut types = Vec::with_capacity(2);
+        if category.is_declaration() {
+            types.push(
+                inferred_declaration(db, definition)
+                    .declared()
+                    .map(|declared| declared.inner_type()),
+            );
+        }
+        if category.is_binding() {
+            types.push(Some(binding_type(db, definition)));
+        }
+        types
     }
 
     fn qualified_name_of(&self, definition: Definition<'db>) -> Option<String> {

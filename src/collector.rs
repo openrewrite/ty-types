@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::panic::UnwindSafe;
 
 use ruff_python_ast::{
     self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor,
@@ -24,6 +25,22 @@ use crate::protocol::{
 };
 use crate::registry::TypeRegistry;
 
+/// Runs `f`, converting a panic inside ty's inference into an error message.
+///
+/// ty's inference panics on some inputs (e.g. astral-sh/ty#4454), and one such file
+/// must not cost a session the results it holds for every other file. Salsa
+/// cancellations keep unwinding: they signal that the revision is gone, so the
+/// result would be meaningless.
+pub fn catch_collect<R>(path: &str, f: impl FnOnce() -> R + UnwindSafe) -> Result<R, String> {
+    ruff_db::panic::catch_unwind(f).map_err(|error| {
+        match error.payload.downcast_ref::<salsa::Cancelled>() {
+            None | Some(salsa::Cancelled::PropagatedPanic) => {}
+            Some(_) => error.resume_unwind(),
+        }
+        error.to_diagnostic_message(Some(path))
+    })
+}
+
 pub struct CollectionResult {
     pub nodes: Vec<NodeAttribution>,
     pub new_types: HashMap<TypeId, TypeDescriptor>,
@@ -36,8 +53,6 @@ pub fn collect_types<'db>(
     include_bindings: bool,
 ) -> CollectionResult {
     let ast = ruff_db::parsed::parsed_module(db, file.python_file(db)).load(db);
-
-    registry.start_tracking();
 
     let mut collector = TypeCollector {
         model: SemanticModel::new(db, file),
@@ -267,7 +282,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         // Pick the first matching overload (fallback to first overload)
         let binding = bindings.iter_flat().flatten().next()?;
 
-        let specialization = binding.specialization(db);
+        let specialization = binding.merged_specialization(db);
 
         // Compute the specialized return type from the binding
         let return_type_id = Some(self.register_type(binding.return_type()));
@@ -307,7 +322,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
 
-                let default_type_id = param.default_type().map(|dt| self.register_type(dt));
+                let default_type_id = param.default_type(db).map(|dt| self.register_type(dt));
 
                 let is_variadic = param.is_variadic() || param.is_keyword_variadic();
                 let concatenate_prefix = in_concatenate && !is_variadic;
@@ -517,5 +532,40 @@ fn expr_kind_name(expr: &ast::Expr) -> &'static str {
         ast::Expr::Tuple(_) => "ExprTuple",
         ast::Expr::Slice(_) => "ExprSlice",
         ast::Expr::IpyEscapeCommand(_) => "ExprIpyEscapeCommand",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catch_collect;
+
+    #[test]
+    fn a_panic_becomes_an_error_naming_the_file_and_the_cause() {
+        let err = catch_collect("ssl.py", || panic!("assertion `left == right` failed"))
+            .expect_err("a panic must be reported, not unwind past the caller");
+
+        assert!(err.contains("ssl.py"), "should name the file: {err}");
+        assert!(
+            err.contains("assertion `left == right` failed"),
+            "should carry ty's panic payload: {err}"
+        );
+    }
+
+    #[test]
+    fn a_salsa_cancellation_keeps_unwinding() {
+        let escaped = std::panic::catch_unwind(|| {
+            let _: Result<(), _> = catch_collect("x.py", || {
+                std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite))
+            });
+        })
+        .expect_err("a cancellation must propagate past catch_collect");
+
+        assert!(
+            matches!(
+                escaped.downcast_ref::<salsa::Cancelled>(),
+                Some(salsa::Cancelled::PendingWrite)
+            ),
+            "the original cancellation must reach the caller unchanged"
+        );
     }
 }

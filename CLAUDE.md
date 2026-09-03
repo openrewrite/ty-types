@@ -41,7 +41,7 @@ Reach for `--release` only to measure inference speed or ship a binary.
 
 - The `ruff/` submodule is pinned to a specific commit on `openrewrite/ruff` `ty-types-2` branch, which widens `pub(crate)` → `pub` across `ty_python_semantic`. This gives us access to structured type internals (callable signatures, type var bounds, known instance classes, etc.).
 - Update the submodule with `cd ruff && git fetch origin ty-types-2 && git checkout origin/ty-types-2`.
-- Rust edition 2024, requires Rust 1.95+.
+- Rust edition 2024, requires Rust 1.96+.
 
 ## Wire Protocol
 
@@ -50,6 +50,8 @@ JSON-RPC over stdin/stdout, one JSON object per line.
 Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
 
 A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
+
+Any file can fail: ty's inference panics on some inputs. `collector::catch_collect` confines that to the one file, so drive inference through it — a bare `collect_types` call lets one bad file abort the whole process. See README.md: getTypes.
 
 ### Backwards compatibility
 

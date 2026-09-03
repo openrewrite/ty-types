@@ -1779,3 +1779,77 @@ fn test_bindings_are_omitted_unless_requested() {
         "binding should be absent without includeBindings"
     );
 }
+
+#[test]
+fn one_file_failing_inference_does_not_end_the_session() {
+    // A shadowing `typing.py` makes `dict(a=1)` panic ty's inference (astral-sh/ty#4454).
+    let dir = create_test_project(&[
+        ("typing.py", ""),
+        ("trigger.py", "f = dict(a=1)\n"),
+        ("good.py", "x: int = 1\n"),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &get_types_request("trigger.py", 2),
+        &get_types_request("good.py", 3),
+        &shutdown_request(99),
+    ]);
+
+    let good = responses
+        .iter()
+        .find(|r| r["id"] == 3)
+        .expect("the request after a failing one must still be answered");
+    assert!(
+        good["result"]["nodes"].is_array() || good["result"]["nodes"].is_object(),
+        "expected types for good.py, got {good}"
+    );
+
+    // Conditional so the test still states something true once ty stops panicking here.
+    let trigger = responses.iter().find(|r| r["id"] == 2).unwrap();
+    if let Some(error) = trigger.get("error") {
+        assert_eq!(error["code"], -32001, "inference failure code");
+        assert!(
+            error["message"].as_str().unwrap().contains("trigger.py"),
+            "the error must name the file: {error}"
+        );
+    }
+}
+
+#[test]
+fn one_shot_emits_the_files_it_could_analyze_and_reports_a_partial_run() {
+    // Same trigger as above: see `one_file_failing_inference_does_not_end_the_session`.
+    let dir = create_test_project(&[
+        ("typing.py", ""),
+        ("trigger.py", "f = dict(a=1)\n"),
+        ("good.py", "x: int = 1\n"),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ty-types"))
+        .args([
+            &format!("{root}/trigger.py"),
+            &format!("{root}/good.py"),
+            "--project-root",
+            root,
+        ])
+        .output()
+        .expect("failed to run ty-types");
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON even on failure");
+    let files = parsed["files"].as_object().unwrap();
+    assert!(
+        files.keys().any(|k| k.ends_with("good.py")),
+        "a file that failed must not suppress the ones that succeeded: {:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+
+    if !files.keys().any(|k| k.ends_with("trigger.py")) {
+        assert!(
+            !output.status.success(),
+            "a skipped file must make the run report failure"
+        );
+    }
+}

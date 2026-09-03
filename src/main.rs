@@ -6,6 +6,7 @@ mod protocol;
 mod registry;
 
 use std::io::{self, BufRead, Write};
+use std::panic::AssertUnwindSafe;
 use std::process;
 
 use protocol::{
@@ -117,6 +118,7 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
     let program = db.project().program(&db);
     let mut registry = TypeRegistry::new(program);
     let mut files = std::collections::HashMap::new();
+    let mut skipped = 0usize;
 
     for file_arg in file_args {
         let absolute = std::fs::canonicalize(file_arg).unwrap_or_else(|e| {
@@ -135,13 +137,19 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
                 process::exit(1);
             });
 
-        let result = collector::collect_types(
-            &db,
-            ProgramFile::new(&db, file, program),
-            &mut registry,
-            bindings,
-        );
-        files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+        let program_file = ProgramFile::new(&db, file, program);
+        let registry = &mut registry;
+        let collect =
+            AssertUnwindSafe(|| collector::collect_types(&db, program_file, registry, bindings));
+        match collector::catch_collect(sys_path.as_str(), collect) {
+            Ok(result) => {
+                files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+            }
+            Err(message) => {
+                eprintln!("warning: {message}");
+                skipped += 1;
+            }
+        }
     }
 
     let output = CliResult {
@@ -154,6 +162,13 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
         process::exit(1);
     });
     println!();
+
+    // The JSON is complete for the files that did resolve, so it is written either
+    // way; the status is what tells a caller the run was partial.
+    if skipped > 0 {
+        eprintln!("Error: {skipped} file(s) could not be analyzed");
+        process::exit(1);
+    }
 }
 
 /// JSON-RPC server mode over stdin/stdout.
@@ -383,7 +398,15 @@ fn handle_get_types<'db>(
     };
 
     let program_file = ProgramFile::new(db, file, db.project().program(db));
-    let result = collector::collect_types(db, program_file, registry, params.include_bindings);
+    let include_bindings = params.include_bindings;
+    let collect =
+        AssertUnwindSafe(|| collector::collect_types(db, program_file, registry, include_bindings));
+    let result = match collector::catch_collect(file_path.as_str(), collect) {
+        Ok(result) => result,
+        Err(message) => {
+            return JsonRpcResponse::error(request.id.clone(), -32001, message);
+        }
+    };
 
     let mut types = result.new_types;
     if !params.include_display {

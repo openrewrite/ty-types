@@ -23,7 +23,7 @@ pub struct TypeRegistry<'db> {
     type_to_id: FxHashMap<Type<'db>, TypeId>,
     descriptors: FxHashMap<TypeId, TypeDescriptor>,
     next_id: TypeId,
-    /// Tracks all type IDs registered since the last `start_tracking()` call,
+    /// Tracks all type IDs registered since the last `drain_new_types()`,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
     /// A session covers a single project, hence a single program, so one
@@ -84,13 +84,10 @@ impl<'db> TypeRegistry<'db> {
             .collect()
     }
 
-    /// Begin tracking newly registered types (including transitive components).
-    pub fn start_tracking(&mut self) {
-        self.tracked_new_ids.clear();
-    }
-
-    /// Drain all type IDs registered since the last `start_tracking()` call
-    /// and return their descriptors.
+    /// Drain all type IDs registered since the previous drain and return their
+    /// descriptors. Draining is the only thing that clears the pending set, so types
+    /// registered by a request that failed part-way reach the client with the next
+    /// successful one.
     pub fn drain_new_types(&mut self) -> std::collections::HashMap<TypeId, TypeDescriptor> {
         self.tracked_new_ids
             .drain(..)
@@ -187,7 +184,7 @@ impl<'db> TypeRegistry<'db> {
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
                 let default_type_id = param
-                    .default_type()
+                    .default_type(db)
                     .map(|dt| self.register_component(dt, db));
                 let is_variadic = param.is_variadic() || param.is_keyword_variadic();
                 let concatenate_prefix = in_concatenate && !is_variadic;
@@ -405,7 +402,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let cl = instance.class_literal(db, &env);
                 let class_name = cl.name(db).to_string();
-                let module_name = instance.class_module_name(db, &env).map(|m| m.to_string());
+                let module_name = self.resolve_module_name(db, cl.file(db));
                 let qualified_name = Some(cl.qualified_name(db).to_string());
 
                 let supertypes = self.supertypes_from_class_literal(cl, db);
@@ -445,7 +442,7 @@ impl<'db> TypeRegistry<'db> {
                 if let Some(nominal) = instance.nominal_origin_instance(db) {
                     let cl = nominal.class_literal(db, &env);
                     let class_name = cl.name(db).to_string();
-                    let module_name = nominal.class_module_name(db, &env).map(|m| m.to_string());
+                    let module_name = self.resolve_module_name(db, cl.file(db));
                     let qualified_name = Some(cl.qualified_name(db).to_string());
 
                     let supertypes = self.supertypes_from_class_literal(cl, db);
@@ -930,6 +927,7 @@ impl<'db> TypeRegistry<'db> {
 
             Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
+            | Type::SlotDescriptor(_)
             | Type::BoundSuper(_)
             | Type::Divergent(_) => {
                 let display = self.display_string(ty, db);

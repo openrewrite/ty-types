@@ -4,7 +4,7 @@ A Rust CLI that exposes [ty](https://github.com/astral-sh/ty)'s Python type infe
 
 ## Building
 
-Requires Rust 1.95+. The `ruff/` submodule must be checked out first:
+Requires Rust 1.96+. The `ruff/` submodule must be checked out first:
 
 ```bash
 git submodule update --init
@@ -24,6 +24,8 @@ ty-types app.py utils.py --project-root /path/to/project
 ```
 
 If `--project-root` is omitted, it defaults to the parent directory of the first file. Pass `--bindings` to attach a [`BindingInfo`](#bindinginfo) to each name and attribute reference.
+
+A file whose inference panics is reported on stderr and omitted from `files`; the remaining files are still analyzed, and the exit status is non-zero. The JSON on stdout is complete for the files that did resolve, so a caller reads the status to tell a partial run from a complete one.
 
 **Output format:**
 
@@ -100,6 +102,8 @@ Returns:
   "types": { "<TypeId>": <TypeDescriptor>, ... }
 }
 ```
+
+ty's inference panics on some inputs (e.g. [astral-sh/ty#4454](https://github.com/astral-sh/ty/issues/4454)). Such a file answers with a JSON-RPC error of code `-32001` naming the file and the panic, and the session stays usable — later requests are unaffected, and types already registered reach the client with the next successful response.
 
 ### `getTypeRegistry`
 

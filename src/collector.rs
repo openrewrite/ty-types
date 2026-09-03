@@ -124,11 +124,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
     }
 
     /// Resolves a reference to the definition that binds it, through re-export chains.
-    fn binding_info(
-        &self,
-        expr: &ast::Expr,
-        inferred: Option<Type<'db>>,
-    ) -> Option<BindingInfo> {
+    fn binding_info(&self, expr: &ast::Expr, inferred: Option<Type<'db>>) -> Option<BindingInfo> {
         let db = self.db;
         let candidates = match expr {
             ast::Expr::Name(name) => definitions_for_name(

@@ -20,12 +20,22 @@ The registry persists across getTypes requests within a session. This works beca
 cargo check                          # Type-check
 cargo build                          # Build debug binary
 cargo build --release                # Build release binary
+cargo test --profile fast-test       # Run tests — use this, not --release
 
 # Smoke test
 echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/project"},"id":1}
 {"jsonrpc":"2.0","method":"getTypes","params":{"file":"example.py"},"id":2}
 {"jsonrpc":"2.0","method":"shutdown","id":99}' | cargo run
 ```
+
+Always run the suite under `fast-test`. The `release` profile links with fat LTO
+over the whole ruff graph at `codegen-units = 1`, and `cargo test` pays that twice
+— once for the binary the integration tests spawn, once for the test binary — so a
+one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The 45
+tests themselves take seconds either way. `fast-test`'s first build compiles ruff
+from scratch (~9 min, once per checkout).
+
+Reach for `--release` only to measure inference speed or ship a binary.
 
 ## Key Constraints
 

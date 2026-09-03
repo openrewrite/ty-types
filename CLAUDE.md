@@ -39,6 +39,8 @@ JSON-RPC over stdin/stdout, one JSON object per line.
 
 Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
 
+A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
+
 ## TypeDescriptor Variants
 
 Each type in the registry is represented as a `TypeDescriptor` with a `kind` discriminator:

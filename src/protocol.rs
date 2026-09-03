@@ -63,6 +63,8 @@ pub struct GetTypesParams {
     pub file: String,
     #[serde(default = "default_true")]
     pub include_display: bool,
+    #[serde(default)]
+    pub include_bindings: bool,
 }
 
 fn default_true() -> bool {
@@ -110,6 +112,20 @@ pub struct NodeAttribution {
     pub type_id: Option<TypeId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_signature: Option<CallSignatureInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<BindingInfo>,
+}
+
+/// Where a referenced symbol is bound, resolved through re-export chains to the
+/// original binding. See README.md: BindingInfo.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingInfo {
+    /// Module holding the binding, e.g. `pkg._impl`.
+    pub defined_in: String,
+    /// Dotted path including enclosing classes, e.g. `pkg._impl.SEP`,
+    /// `app.Holder.MAX`. `definedIn` says where the module part ends.
+    pub qualified_name: String,
 }
 
 // ─── Call signature info ─────────────────────────────────────────────

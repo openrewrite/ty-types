@@ -23,7 +23,7 @@ Pass one or more Python files as arguments. The output is a single JSON object w
 ty-types app.py utils.py --project-root /path/to/project
 ```
 
-If `--project-root` is omitted, it defaults to the parent directory of the first file.
+If `--project-root` is omitted, it defaults to the parent directory of the first file. Pass `--bindings` to attach a [`BindingInfo`](#bindinginfo) to each name and attribute reference.
 
 **Output format:**
 
@@ -90,6 +90,7 @@ Infers types for a Python file and returns the typed AST nodes plus any new type
 |---|---|---|---|
 | `params.file` | `string` | | File path (absolute or relative to project root) |
 | `params.includeDisplay` | `boolean` | `true` | Include human-readable `display` strings on type descriptors |
+| `params.includeBindings` | `boolean` | `false` | Include a `binding` on each name and attribute reference. Costs roughly 10% inference time and 17% payload |
 
 Returns:
 
@@ -139,8 +140,31 @@ Each entry in the `nodes` array represents a typed AST node:
 | `nodeKind` | `string` | AST node kind (see below) |
 | `typeId` | `integer \| null` | Reference into the type registry |
 | `callSignature` | `CallSignatureInfo \| null` | Present only on `ExprCall` nodes |
+| `binding` | `BindingInfo` | Present on `ExprName` and `ExprAttribute` nodes, and only under `includeBindings` *(omitted when absent)* |
 
 **Node kinds:** `StmtFunctionDef`, `StmtClassDef`, `StmtAssign`, `StmtFor`, `StmtWith`, `ExprCall`, `ExprBoolOp`, `ExprBinOp`, `ExprUnaryOp`, `ExprLambda`, `ExprIf`, `ExprDict`, `ExprSet`, `ExprListComp`, `ExprSetComp`, `ExprDictComp`, `ExprGenerator`, `ExprAwait`, `ExprYield`, `ExprYieldFrom`, `ExprCompare`, `ExprFString`, `ExprTString`, `ExprStringLiteral`, `ExprBytesLiteral`, `ExprNumberLiteral`, `ExprBooleanLiteral`, `ExprNoneLiteral`, `ExprEllipsisLiteral`, `ExprAttribute`, `ExprSubscript`, `ExprStarred`, `ExprName`, `ExprList`, `ExprTuple`, `ExprSlice`, `Parameter`, `ParameterWithDefault`, `Alias`
+
+### BindingInfo
+
+Where a referenced symbol is bound, following re-export chains to the original binding. `pkg/__init__.py` re-exporting `LIMIT` from `pkg._impl` gives the same answer at every reference:
+
+```json
+{
+  "definedIn": "pkg._impl",
+  "qualifiedName": "pkg._impl.LIMIT"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `definedIn` | `string` | Module holding the binding |
+| `qualifiedName` | `string` | Dotted path including enclosing classes, e.g. `app.Holder.MAX`. `definedIn` says where the module part ends |
+
+`moduleName` on a type descriptor is the module of the *value's* type — `builtins` for `SEP: str = "/"`, and absent entirely for `LIMIT = 5`. Binding is a property of the reference, which is why it is reported here rather than on the type.
+
+`definedIn` names the module that binds the symbol, not the one it is conventionally imported from: `os.sep` reports `posixpath.sep`. This is the convention descriptors already use — `os.path.join` reports `moduleName: "posixpath"`.
+
+A symbol bound in more than one branch of a conditional import resolves to the branch whose type was inferred at the reference. Where the branches declare the same type, the choice among them is arbitrary.
 
 ### CallSignatureInfo
 

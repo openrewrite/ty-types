@@ -218,7 +218,7 @@ Every type in the registry is a tagged object with a `"kind"` discriminator. All
 
 Fields marked with *"omitted when empty"* are not present in the JSON when their value is empty or null.
 
-`qualifiedName`, wherever it appears below, is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`.
+`qualifiedName`, wherever it appears below, is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`. Scopes other than modules and classes appear as ty spells them, so a class defined inside a function reads `a.<locals of function 'f'>.C` — split it on `.` only if that spelling is accounted for.
 
 #### `instance`
 
@@ -232,6 +232,9 @@ An object of a class (e.g. `int`, `str`, `MyClass()`).
 | `supertypes` | `integer[]` | Resolved base class type IDs *(omitted when empty)* |
 | `typeArgs` | `integer[]` | Specialization args, e.g. `list[int]` → `[<int>]` *(omitted when empty)* |
 | `classId` | `integer` | Type ID of the corresponding `classLiteral` *(omitted when empty)* |
+| `tupleElements` | `TupleElement[]` | Element types, on tuples and their subclasses *(omitted otherwise)* |
+
+Each `TupleElement` is `{"typeId": <integer>, "kind": <string>}`, where `kind` is `fixed` for a single element, `homogeneous` for the `...` segment of `tuple[int, ...]`, or `typeVarTuple` for the `*Ts` of `tuple[int, *Ts]`. The latter two each stand for an unknown number of elements.
 
 #### `classLiteral`
 
@@ -254,7 +257,41 @@ A `type[C]` constraint (subclass relationship).
 
 | Field | Type | Description |
 |---|---|---|
-| `base` | `integer` | Type ID of the base `classLiteral` |
+| `base` | `integer` | Type ID of the base: a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` |
+
+#### `typeForm`
+
+A `TypeForm[T]` value wrapping a type expression (PEP 747).
+
+| Field | Type | Description |
+|---|---|---|
+| `typeArgument` | `integer` | Type ID of the wrapped type expression |
+
+#### `knownInstance`
+
+A well-known singleton instance ty tracks specially, such as `TypeVar`, `typing.Callable`, `functools.partial(...)` or `range(...)`.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Class name |
+| `knownInstanceKind` | `string` | Which known instance this is |
+| `isNonEmpty` | `boolean` | Whether the instance is known to be non-empty *(omitted when unknown)* |
+| `wrappedType` | `integer` | Type ID of the wrapped type, where the kind wraps one *(omitted otherwise)* |
+| `parameters` | `ParameterInfo[]` | Parameters, where the kind is callable *(omitted when empty)* |
+| `returnType` | `integer` | Return type ID, where the kind is callable *(omitted when empty)* |
+
+#### `enumComplement`
+
+An enum instance with one or more canonical members excluded, e.g. `Color & ~Literal[Color.RED]`.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Enum class name |
+| `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified enum class name *(omitted when empty)* |
+| `classId` | `integer` | Type ID of the enum's `classLiteral` |
+| `excludedNames` | `string[]` | Member names excluded from the enum |
+| `rest` | `integer[]` | Type IDs of the members that remain |
 
 #### `union`
 

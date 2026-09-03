@@ -22,6 +22,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut serve = false;
+    let mut bindings = false;
     let mut project_root: Option<String> = None;
     let mut file_paths: Vec<String> = Vec::new();
 
@@ -29,6 +30,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--serve" => serve = true,
+            "--bindings" => bindings = true,
             "--project-root" => {
                 i += 1;
                 if i >= args.len() {
@@ -54,10 +56,18 @@ fn main() {
         process::exit(1);
     }
 
+    if serve && bindings {
+        eprintln!(
+            "Error: --bindings applies to one-shot mode; \
+             pass includeBindings on each getTypes request instead"
+        );
+        process::exit(1);
+    }
+
     if serve {
         run_serve();
     } else if !file_paths.is_empty() {
-        run_oneshot(&file_paths, project_root.as_deref());
+        run_oneshot(&file_paths, project_root.as_deref(), bindings);
     } else {
         print_usage();
         process::exit(1);
@@ -74,10 +84,11 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --project-root DIR   Override project root (defaults to first FILE's parent)");
+    eprintln!("  --bindings           Report where each referenced symbol is bound");
 }
 
 /// One-shot mode: infer types for one or more files and print JSON to stdout.
-fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
+fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: bool) {
     let first_absolute = std::fs::canonicalize(&file_args[0]).unwrap_or_else(|e| {
         eprintln!("Error: cannot resolve '{}': {e}", file_args[0]);
         process::exit(1);
@@ -124,8 +135,12 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
                 process::exit(1);
             });
 
-        let result =
-            collector::collect_types(&db, ProgramFile::new(&db, file, program), &mut registry);
+        let result = collector::collect_types(
+            &db,
+            ProgramFile::new(&db, file, program),
+            &mut registry,
+            bindings,
+        );
         files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
     }
 
@@ -368,7 +383,7 @@ fn handle_get_types<'db>(
     };
 
     let program_file = ProgramFile::new(db, file, db.project().program(db));
-    let result = collector::collect_types(db, program_file, registry);
+    let result = collector::collect_types(db, program_file, registry, params.include_bindings);
 
     let mut types = result.new_types;
     if !params.include_display {

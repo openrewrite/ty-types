@@ -20,12 +20,22 @@ The registry persists across getTypes requests within a session. This works beca
 cargo check                          # Type-check
 cargo build                          # Build debug binary
 cargo build --release                # Build release binary
+cargo test --profile fast-test       # Run tests — use this, not --release
 
 # Smoke test
 echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/project"},"id":1}
 {"jsonrpc":"2.0","method":"getTypes","params":{"file":"example.py"},"id":2}
 {"jsonrpc":"2.0","method":"shutdown","id":99}' | cargo run
 ```
+
+Always run the suite under `fast-test`. The `release` profile links with fat LTO
+over the whole ruff graph at `codegen-units = 1`, and `cargo test` pays that twice
+— once for the binary the integration tests spawn, once for the test binary — so a
+one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The 45
+tests themselves take seconds either way. `fast-test`'s first build compiles ruff
+from scratch (~9 min, once per checkout).
+
+Reach for `--release` only to measure inference speed or ship a binary.
 
 ## Key Constraints
 
@@ -38,6 +48,16 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 JSON-RPC over stdin/stdout, one JSON object per line.
 
 Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
+
+A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
+
+### Backwards compatibility
+
+Clients — rewrite-python, moderne-cli's `PythonTypeMapping` — upgrade this binary on their own schedule, so treat the wire format as a published contract. Keep changes additive: a new request parameter takes `#[serde(default)]`, and a new response field is `Option` with `skip_serializing_if`, so a client that neither sends nor reads it sees the output it saw before. Where a feature costs real time or payload, put it behind a request flag that defaults off, as `includeDisplay` and `includeBindings` do.
+
+Removing a field, renaming one, changing its type, or changing what an existing one means all break clients and need a version bump. Releases are tagged `v0.0.N` and the workflow rewrites the placeholder `version = "0.0.0"`, so a breaking release means moving the minor — `v0.1.0` — rather than continuing the patch series.
+
+Confirm compatibility by running the previous binary and the new one over the same corpus and comparing. `files` and `types` are `HashMap`s that serialize in a different order on every run, so compare parsed JSON; a byte diff reports a difference either way and tells you nothing.
 
 ## TypeDescriptor Variants
 

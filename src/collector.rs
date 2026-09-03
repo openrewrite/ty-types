@@ -6,14 +6,22 @@ use ruff_python_ast::{
 };
 use ruff_text_size::Ranged;
 use ty_python_core::ProgramFile;
+use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_semantic::types::call::CallArguments;
 use ty_python_semantic::types::call::bind::CheckTypesMode;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
+use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
 use ty_python_semantic::types::{ParameterKind, ProgramEnvironment, Type, TypeContext};
-use ty_python_semantic::{Db, HasType, SemanticModel};
+use ty_python_semantic::types::{binding_type, inferred_declaration};
+use ty_python_semantic::{
+    Db, HasType, ImportAliasResolution, ResolvedDefinition, SemanticModel,
+    definitions_for_attribute, definitions_for_name,
+};
 
-use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
+use crate::protocol::{
+    BindingInfo, CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId,
+};
 use crate::registry::TypeRegistry;
 
 pub struct CollectionResult {
@@ -25,6 +33,7 @@ pub fn collect_types<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
     registry: &mut TypeRegistry<'db>,
+    include_bindings: bool,
 ) -> CollectionResult {
     let ast = ruff_db::parsed::parsed_module(db, file.python_file(db)).load(db);
 
@@ -37,6 +46,7 @@ pub fn collect_types<'db>(
         env: ProgramEnvironment::from_program(file.program(db)),
         db,
         registry,
+        include_bindings,
         nodes: Vec::new(),
     };
 
@@ -55,6 +65,7 @@ struct TypeCollector<'db, 'reg> {
     env: ProgramEnvironment<'db>,
     db: &'db dyn Db,
     registry: &'reg mut TypeRegistry<'db>,
+    include_bindings: bool,
     nodes: Vec<NodeAttribution>,
 }
 
@@ -71,6 +82,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             node_kind: Cow::Borrowed(node_kind),
             type_id,
             call_signature: None,
+            binding: None,
         });
     }
 
@@ -86,7 +98,131 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             node_kind: Cow::Borrowed("ExprCall"),
             type_id,
             call_signature,
+            binding: None,
         });
+    }
+
+    fn record_expr_node(
+        &mut self,
+        node_kind: &'static str,
+        expr: &ast::Expr,
+        inferred: Option<Type<'db>>,
+        type_id: Option<TypeId>,
+    ) {
+        let binding = self
+            .include_bindings
+            .then(|| self.binding_info(expr, inferred))
+            .flatten();
+        self.nodes.push(NodeAttribution {
+            start: expr.range().start().into(),
+            end: expr.range().end().into(),
+            node_kind: Cow::Borrowed(node_kind),
+            type_id,
+            call_signature: None,
+            binding,
+        });
+    }
+
+    /// Resolves a reference to the definition that binds it, through re-export chains.
+    fn binding_info(&self, expr: &ast::Expr, inferred: Option<Type<'db>>) -> Option<BindingInfo> {
+        let db = self.db;
+        let candidates = match expr {
+            ast::Expr::Name(name) => definitions_for_name(
+                &self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            ast::Expr::Attribute(attribute) => definitions_for_attribute(&self.model, attribute),
+            _ => return None,
+        };
+        let candidates: Vec<Definition<'db>> = candidates
+            .into_iter()
+            .filter_map(|resolved| match resolved {
+                ResolvedDefinition::Definition(definition) => Some(definition),
+                _ => None,
+            })
+            .collect();
+
+        // A symbol bound under `if sys.platform == ...` yields one definition per
+        // branch, in source order and unfiltered by reachability. The live branch is
+        // the one whose type is the type inferred at this reference. A lone candidate
+        // is that answer already, whatever its type.
+        let definition = match candidates.as_slice() {
+            [definition] => *definition,
+            _ => candidates
+                .iter()
+                .copied()
+                .find(|definition| self.reference_types_of(*definition).contains(&inferred))
+                .or_else(|| candidates.first().copied())?,
+        };
+
+        Some(BindingInfo {
+            defined_in: self.module_name_of(definition.file(db))?,
+            qualified_name: self.qualified_name_of(definition)?,
+        })
+    }
+
+    /// The types a reference to `definition` can carry: its declared type where it
+    /// declares one (`LEVEL: int = 7` reads as `int`), and its assigned type
+    /// otherwise (`LEVEL = 7` reads as `Literal[7]`).
+    ///
+    /// `binding_type` panics on a definition that declares without binding
+    /// (`x: int` with no value, outside a stub), hence the category gate.
+    fn reference_types_of(&self, definition: Definition<'db>) -> Vec<Option<Type<'db>>> {
+        let db = self.db;
+        let in_stub = definition.file(db).path(db).extension() == Some("pyi");
+        let module = ruff_db::parsed::parsed_module(db, definition.python_file(db)).load(db);
+        let category = definition.kind(db).category(in_stub, &module);
+
+        let mut types = Vec::with_capacity(2);
+        if category.is_declaration() {
+            types.push(
+                inferred_declaration(db, definition)
+                    .declared()
+                    .map(|declared| declared.inner_type()),
+            );
+        }
+        if category.is_binding() {
+            types.push(Some(binding_type(db, definition)));
+        }
+        types
+    }
+
+    fn qualified_name_of(&self, definition: Definition<'db>) -> Option<String> {
+        let db = self.db;
+        let mut components = qualified_name_components_from_scope(
+            db,
+            definition.program_file(db),
+            definition.file_scope(db),
+            0,
+        );
+        components.push(self.definition_name_of(definition)?);
+        Some(components.join("."))
+    }
+
+    /// `Definition::name` covers function, class, type-alias and plain assignment.
+    /// A typed module constant (`SEP: str = "/"`) is an annotated assignment, whose
+    /// name comes from its target expression.
+    fn definition_name_of(&self, definition: Definition<'db>) -> Option<String> {
+        let db = self.db;
+        definition.name(db).or_else(|| {
+            let module = ruff_db::parsed::parsed_module(db, definition.python_file(db)).load(db);
+            match definition.kind(db) {
+                DefinitionKind::AnnotatedAssignment(assignment) => assignment
+                    .target(&module)
+                    .as_name_expr()
+                    .map(|name| name.id.as_str().to_string()),
+                _ => None,
+            }
+        })
+    }
+
+    fn module_name_of(&self, file: ruff_db::files::File) -> Option<String> {
+        let db = self.db;
+        let resolver_file =
+            ty_module_resolver::ResolverFile::new(db, file, self.env.resolver_environment(db));
+        ty_module_resolver::file_to_module(db, resolver_file).map(|m| m.name(db).to_string())
     }
 
     fn register_type(&mut self, ty: ty_python_semantic::types::Type<'db>) -> TypeId {
@@ -288,13 +424,13 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
                 let call_sig = self.build_call_signature(call_expr);
                 self.record_call_node(expr.range(), Some(type_id), call_sig);
             } else {
-                self.record_node(node_kind, expr.range(), Some(type_id));
+                self.record_expr_node(node_kind, expr, Some(ty), Some(type_id));
             }
         } else if let ast::Expr::Call(call_expr) = expr {
             let call_sig = self.build_call_signature(call_expr);
             self.record_call_node(expr.range(), None, call_sig);
         } else {
-            self.record_node(node_kind, expr.range(), None);
+            self.record_expr_node(node_kind, expr, None, None);
         }
 
         source_order::walk_expr(self, expr);

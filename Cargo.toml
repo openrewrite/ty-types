@@ -32,5 +32,21 @@ lto = true
 codegen-units = 1
 strip = true
 
+# The profile to run tests under. See CLAUDE.md: Development Commands.
+# The heavy dependencies stay optimized because the tests spawn the binary and
+# run real inference against typeshed.
+[profile.fast-test]
+inherits = "dev"
+opt-level = 1
+debug = "line-tables-only"
+lto = "off"
+
+[profile.fast-test.package.salsa]
+opt-level = 3
+[profile.fast-test.package.ruff_python_parser]
+opt-level = 3
+[profile.fast-test.package.ruff_python_ast]
+opt-level = 3
+
 [lints.clippy]
 dbg_macro = "warn"

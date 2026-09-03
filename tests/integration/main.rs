@@ -1596,3 +1596,186 @@ fn test_non_tuple_instance_has_no_tuple_elements() {
         "non-tuple instance should omit tupleElements: {list:?}"
     );
 }
+
+/// Fixture: a package whose `__init__.py` re-exports constants defined in a
+/// submodule, and a consumer reaching them by alias and by module attribute.
+fn reexported_constants_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("pkg/_impl.py", "SEP: str = \"/\"\nLIMIT = 5\n"),
+        ("pkg/__init__.py", "from pkg._impl import SEP, LIMIT\n"),
+        (
+            "main.py",
+            "import pkg\nfrom pkg import SEP as SEPARATOR\n\nprint(SEPARATOR)\nprint(pkg.LIMIT)\n",
+        ),
+    ])
+}
+
+fn get_types_with_bindings_request(file: &str, id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getTypes",
+        "params": {"file": file, "includeBindings": true},
+        "id": id
+    })
+    .to_string()
+}
+
+/// Returns the `binding` of the one node of `node_kind` spanning exactly `text`.
+fn binding_at(
+    nodes: &[serde_json::Value],
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    let matches: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| {
+            n["nodeKind"] == node_kind
+                && &source
+                    [n["start"].as_u64().unwrap() as usize..n["end"].as_u64().unwrap() as usize]
+                    == text
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one {node_kind} node spanning {text:?}, got {}",
+        matches.len()
+    );
+    matches[0]["binding"].clone()
+}
+
+#[test]
+fn test_binding_follows_reexport_chain_for_name_and_attribute_references() {
+    let dir = reexported_constants_project();
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    // An annotated assignment: its value type reports `builtins`, and its name
+    // needs the fallback in `definition_name_of`.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "SEPARATOR"),
+        serde_json::json!({"definedIn": "pkg._impl", "qualifiedName": "pkg._impl.SEP"}),
+    );
+
+    // Reached as a module attribute rather than an imported name.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprAttribute", "pkg.LIMIT"),
+        serde_json::json!({"definedIn": "pkg._impl", "qualifiedName": "pkg._impl.LIMIT"}),
+    );
+}
+
+#[test]
+fn test_binding_qualified_name_carries_the_enclosing_class() {
+    let dir = create_test_project(&[(
+        "cls.py",
+        "class Holder:\n    MAX = 10\n\n\nprint(Holder.MAX)\n",
+    )]);
+    let source = std::fs::read_to_string(dir.path().join("cls.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("cls.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprAttribute", "Holder.MAX"),
+        serde_json::json!({"definedIn": "cls", "qualifiedName": "cls.Holder.MAX"}),
+    );
+}
+
+/// Fixture: `NAME` bound in both arms of a `sys.platform` conditional, with the
+/// arms' bodies supplied by the caller. The platform is pinned so the `else` arm
+/// is the live one on every host.
+fn platform_conditional_project(win_body: &str, posix_body: &str) -> tempfile::TempDir {
+    create_test_project(&[
+        ("ty.toml", "[environment]\npython-platform = \"linux\"\n"),
+        ("pkg/_win.py", win_body),
+        ("pkg/_posix.py", posix_body),
+        (
+            "pkg/__init__.py",
+            "import sys\n\nif sys.platform == \"win32\":\n    from pkg._win import NAME\nelse:\n    from pkg._posix import NAME\n",
+        ),
+        ("main.py", "from pkg import NAME\n\nprint(NAME)\n"),
+    ])
+}
+
+fn assert_binds_to_posix_arm(dir: &tempfile::TempDir) {
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "NAME"),
+        serde_json::json!({"definedIn": "pkg._posix", "qualifiedName": "pkg._posix.NAME"}),
+    );
+}
+
+#[test]
+fn test_binding_picks_the_branch_matching_the_inferred_type() {
+    // `_win` is the first arm in source order; the inferred `Literal[30]` is what
+    // makes `_posix` the right answer.
+    assert_binds_to_posix_arm(&platform_conditional_project("NAME = 60\n", "NAME = 30\n"));
+}
+
+#[test]
+fn test_binding_matches_a_declared_type_against_the_reference() {
+    // The reference reads as the declared `int`, which no arm's *assigned* type
+    // (`Literal[60]`, `Literal[30]`) equals.
+    assert_binds_to_posix_arm(&platform_conditional_project(
+        "NAME = 60\n",
+        "NAME: int = 30\n",
+    ));
+}
+
+#[test]
+fn test_binding_survives_a_symbol_that_is_declared_before_it_is_bound() {
+    let dir = create_test_project(&[
+        ("cfg.py", "COUNT: int\nCOUNT = 3\n"),
+        ("main.py", "from cfg import COUNT\n\nprint(COUNT)\n"),
+    ]);
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    // `COUNT: int` declares without binding, and asking ty for its binding type
+    // aborts the process rather than returning.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "COUNT"),
+        serde_json::json!({"definedIn": "cfg", "qualifiedName": "cfg.COUNT"}),
+    );
+}
+
+#[test]
+fn test_bindings_are_omitted_unless_requested() {
+    let dir = reexported_constants_project();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap();
+    assert!(
+        nodes.iter().all(|n| n.get("binding").is_none()),
+        "binding should be absent without includeBindings"
+    );
+}

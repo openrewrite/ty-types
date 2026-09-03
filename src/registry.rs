@@ -36,6 +36,13 @@ pub struct RegistrationResult {
     pub is_new: bool,
 }
 
+/// A qualified name that cannot identify the class it names is worse than none:
+/// ty spells a class built from a runtime name `<unknown>`, so two of them in one
+/// scope render identically and a client keying by this field merges them.
+fn identifying(qualified_name: String) -> Option<String> {
+    (!qualified_name.contains("<unknown>")).then_some(qualified_name)
+}
+
 impl<'db> TypeRegistry<'db> {
     pub fn new(program: Program<'db>) -> Self {
         Self {
@@ -363,7 +370,7 @@ impl<'db> TypeRegistry<'db> {
                         TypeDescriptor::EnumLiteral {
                             display,
                             class_name: enum_class.name(db).to_string(),
-                            qualified_name: Some(enum_class.qualified_name(db).to_string()),
+                            qualified_name: identifying(enum_class.qualified_name(db).to_string()),
                             member_name: e.name(db).to_string(),
                         }
                     }
@@ -410,7 +417,7 @@ impl<'db> TypeRegistry<'db> {
                 let cl = instance.class_literal(db, &env);
                 let class_name = cl.name(db).to_string();
                 let module_name = self.resolve_module_name(db, cl.file(db));
-                let qualified_name = Some(cl.qualified_name(db).to_string());
+                let qualified_name = identifying(cl.qualified_name(db).to_string());
 
                 let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -450,7 +457,7 @@ impl<'db> TypeRegistry<'db> {
                     let cl = nominal.class_literal(db, &env);
                     let class_name = cl.name(db).to_string();
                     let module_name = self.resolve_module_name(db, cl.file(db));
-                    let qualified_name = Some(cl.qualified_name(db).to_string());
+                    let qualified_name = identifying(cl.qualified_name(db).to_string());
 
                     let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -500,7 +507,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let module_name = self.resolve_module_name(db, class_literal.file(db));
-                let qualified_name = Some(class_literal.qualified_name(db).to_string());
+                let qualified_name = identifying(class_literal.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(class_literal.generic_context(db), db);
                 let supertypes = self.supertypes_from_class_literal(class_literal, db);
@@ -538,7 +545,7 @@ impl<'db> TypeRegistry<'db> {
                 let class_name = origin.name(db).to_string();
                 let module_name = self.resolve_module_name(db, origin.file(db));
                 let qualified_name =
-                    Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
+                    identifying(ClassLiteral::Static(origin).qualified_name(db).to_string());
                 let supertypes: Vec<TypeId> = origin
                     .explicit_bases(db)
                     .iter()
@@ -743,7 +750,7 @@ impl<'db> TypeRegistry<'db> {
                 } else {
                     Some(self.register_component(value_ty, db))
                 };
-                let qualified_name = Some(type_alias.qualified_name(db).to_string());
+                let qualified_name = identifying(type_alias.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(type_alias.generic_context(db), db);
                 TypeDescriptor::TypeAlias {
@@ -761,7 +768,8 @@ impl<'db> TypeRegistry<'db> {
                 let name = defining_class
                     .map(|c| c.name(db).to_string())
                     .unwrap_or_default();
-                let qualified_name = defining_class.map(|c| c.qualified_name(db).to_string());
+                let qualified_name =
+                    defining_class.and_then(|c| identifying(c.qualified_name(db).to_string()));
                 let schema = typed_dict.items(db);
                 let fields: Vec<TypedDictFieldInfo> = schema
                     .iter()
@@ -909,7 +917,7 @@ impl<'db> TypeRegistry<'db> {
                 let enum_class = complement.enum_class(db);
                 let class_name = enum_class.name(db).to_string();
                 let module_name = self.resolve_module_name(db, enum_class.file(db));
-                let qualified_name = Some(enum_class.qualified_name(db).to_string());
+                let qualified_name = identifying(enum_class.qualified_name(db).to_string());
                 let class_id = self.register_component(Type::ClassLiteral(enum_class), db);
                 let excluded_names = complement
                     .excluded_names(db)

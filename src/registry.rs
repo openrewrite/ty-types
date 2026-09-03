@@ -61,9 +61,16 @@ impl<'db> TypeRegistry<'db> {
         self.next_id += 1;
         self.type_to_id.insert(ty, id);
 
+        // `build_descriptor` registers component types, so a self-referential type only
+        // terminates if the id is interned first. It also runs ty queries that can panic,
+        // which `catch_collect` turns into one failed file — seeding the descriptor and
+        // the pending id keeps every id the client receives resolvable.
+        self.descriptors
+            .insert(id, TypeDescriptor::Other { display: None });
+        self.tracked_new_ids.push(id);
+
         let descriptor = self.build_descriptor(ty, db);
         self.descriptors.insert(id, descriptor);
-        self.tracked_new_ids.push(id);
 
         RegistrationResult {
             type_id: id,

@@ -55,6 +55,14 @@ impl JsonRpcResponse {
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub project_root: String,
+    /// First-party package root. When set, the session's `getTypes` registry emits
+    /// classes defined outside this root as `classRef` (identity only).
+    #[serde(default)]
+    pub first_party_root: Option<String>,
+    /// First-party top-level module names. Used when `first_party_root` is absent:
+    /// classes outside these modules are emitted as `classRef`.
+    #[serde(default)]
+    pub first_party_modules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +77,39 @@ pub struct GetTypesParams {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibraryApiParams {
+    /// Single root, unioned with `roots`. Accepted for backward compatibility.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Absolute paths to the roots the distribution installs. Each is either a
+    /// package directory or a bare module file, and the boundary spans their union.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    /// Emit modules with an underscore-prefixed path component, which the
+    /// convention marks private.
+    #[serde(default)]
+    pub include_private_modules: bool,
+    /// Emit module-level symbols that `__all__` omits, or — with no `__all__` —
+    /// underscore-prefixed ones.
+    #[serde(default)]
+    pub include_non_exported_symbols: bool,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetStdlibApiParams {
+    /// Top-level stdlib module names to extract as the local unit. Empty ⇒ all
+    /// stdlib modules are local (a single fully-expanded dump).
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default = "default_true")]
+    pub include_display: bool,
 }
 
 // ─── Response payloads ───────────────────────────────────────────────
@@ -88,6 +129,32 @@ pub struct GetTypesResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTypeRegistryResult {
+    pub types: HashMap<TypeId, TypeDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySymbolInfo {
+    pub name: String,
+    pub type_id: TypeId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryModuleInfo {
+    /// Dotted module FQN, e.g. "requests.sessions".
+    pub name: String,
+    /// Module file path relative to its root's parent, e.g. "requests/sessions.py".
+    /// Including the root's own name keeps same-named modules from sibling roots
+    /// (`mypy/main.py` vs `mypyc/main.py`) distinct.
+    pub file: String,
+    pub symbols: Vec<LibrarySymbolInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetLibraryApiResult {
+    pub modules: Vec<LibraryModuleInfo>,
     pub types: HashMap<TypeId, TypeDescriptor>,
 }
 
@@ -246,6 +313,20 @@ pub enum TypeDescriptor {
         supertypes: Vec<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         members: Vec<ClassMemberInfo>,
+    },
+
+    // Reference to a class defined outside the extracted package boundary.
+    // Identity only — no members, supertypes, or type parameters. Maps to
+    // the V3 type-table TAG_CLASS_REF on the consumer side.
+    #[serde(rename_all = "camelCase")]
+    ClassRef {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        class_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        qualified_name: Option<String>,
     },
 
     // type[C] — subclass-of
@@ -445,6 +526,11 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        /// Canonical module of the known class (e.g. `dataclasses` for
+        /// `dataclasses.Field`, `typing` for `typing.Final`). Lets consumers
+        /// build the correct fully-qualified name instead of assuming `typing`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
         /// Which singleton this is (`Range`, `FunctoolsPartial`, `TypeVar`, …).
         /// `className` alone cannot distinguish them, since several share a class.
         known_instance_kind: &'static str,
@@ -546,6 +632,7 @@ impl TypeDescriptor {
         match self {
             Self::Instance { display, .. }
             | Self::ClassLiteral { display, .. }
+            | Self::ClassRef { display, .. }
             | Self::SubclassOf { display, .. }
             | Self::TypeForm { display, .. }
             | Self::Union { display, .. }

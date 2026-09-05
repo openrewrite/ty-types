@@ -1,3 +1,4 @@
+use ruff_db::system::SystemPathBuf;
 use rustc_hash::FxHashMap;
 use ty_module_resolver::ResolverFile;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
@@ -15,6 +16,14 @@ use crate::protocol::{
     TypedDictExtraItemsInfo, TypedDictFieldInfo,
 };
 
+/// Bounds which class literals get fully expanded vs. emitted as `classRef`.
+pub enum Boundary {
+    /// Local iff the class's file is under any of these filesystem roots.
+    UnderRoots(Vec<SystemPathBuf>),
+    /// Local iff the class's top-level module name is in this set (stdlib extraction).
+    Modules(rustc_hash::FxHashSet<String>),
+}
+
 /// A session-scoped registry that deduplicates types by identity.
 ///
 /// Since ty's `Type<'db>` derives `Hash + Eq` and Salsa interns types,
@@ -26,6 +35,9 @@ pub struct TypeRegistry<'db> {
     /// Tracks all type IDs registered since the last `drain_new_types()`,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
+    /// When set, class literals whose definition file is not local to the boundary
+    /// are emitted as `classRef` instead of being expanded.
+    boundary: Option<Boundary>,
     /// A session covers a single project, hence a single program, so one
     /// environment serves every descriptor built here.
     env: ProgramEnvironment<'db>,
@@ -50,8 +62,51 @@ impl<'db> TypeRegistry<'db> {
             descriptors: FxHashMap::default(),
             next_id: 1, // start at 1, reserve 0 for "no type"
             tracked_new_ids: Vec::new(),
+            boundary: None,
             env: ProgramEnvironment::from_program(program),
         }
+    }
+
+    /// Construct a registry with an explicit boundary: classes outside it are
+    /// emitted as `classRef` instead of being fully expanded.
+    pub fn with_boundary(program: Program<'db>, boundary: Boundary) -> Self {
+        Self {
+            boundary: Some(boundary),
+            ..Self::new(program)
+        }
+    }
+
+    /// Bound class-literal expansion to a single filesystem `root`.
+    pub fn with_boundary_root(program: Program<'db>, root: SystemPathBuf) -> Self {
+        Self::with_boundary(program, Boundary::UnderRoots(vec![root]))
+    }
+
+    /// Bound class-literal expansion to a set of top-level module names
+    /// (stdlib extraction): classes outside these modules become `classRef`.
+    pub fn with_boundary_modules(
+        program: Program<'db>,
+        modules: rustc_hash::FxHashSet<String>,
+    ) -> Self {
+        Self::with_boundary(program, Boundary::Modules(modules))
+    }
+
+    /// Whether a class defined in `file` should be emitted as a `classRef`
+    /// (a boundary is set and the class is not local to it).
+    fn is_external(&self, db: &'db dyn Db, file: ruff_db::files::File) -> bool {
+        let Some(boundary) = &self.boundary else {
+            return false;
+        };
+        let local = match boundary {
+            Boundary::UnderRoots(roots) => file
+                .path(db)
+                .as_system_path()
+                .is_some_and(|p| roots.iter().any(|root| p.starts_with(root.as_path()))),
+            Boundary::Modules(modules) => self.resolve_module_name(db, file).is_some_and(|name| {
+                let top = name.split('.').next().unwrap_or(name.as_str());
+                modules.contains(top)
+            }),
+        };
+        !local
     }
 
     /// Register a type and return its ID. If the type was already registered,
@@ -504,6 +559,20 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::ClassLiteral(class_literal) => {
+                let cl_file = class_literal.file(db);
+                let external = self.is_external(db, cl_file);
+                if external {
+                    let display = self.display_string(ty, db);
+                    let class_name = class_literal.name(db).to_string();
+                    let module_name = self.resolve_module_name(db, cl_file);
+                    let qualified_name = Some(class_literal.qualified_name(db).to_string());
+                    return TypeDescriptor::ClassRef {
+                        display,
+                        class_name,
+                        module_name,
+                        qualified_name,
+                    };
+                }
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let module_name = self.resolve_module_name(db, class_literal.file(db));
@@ -540,10 +609,25 @@ impl<'db> TypeRegistry<'db> {
             }
 
             Type::GenericAlias(alias) => {
-                let display = self.display_string(ty, db);
                 let origin = alias.origin(db);
+                let origin_file = origin.file(db);
+                let external = self.is_external(db, origin_file);
+                if external {
+                    let display = self.display_string(ty, db);
+                    let class_name = origin.name(db).to_string();
+                    let module_name = self.resolve_module_name(db, origin_file);
+                    let qualified_name =
+                        Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
+                    return TypeDescriptor::ClassRef {
+                        display,
+                        class_name,
+                        module_name,
+                        qualified_name,
+                    };
+                }
+                let display = self.display_string(ty, db);
                 let class_name = origin.name(db).to_string();
-                let module_name = self.resolve_module_name(db, origin.file(db));
+                let module_name = self.resolve_module_name(db, origin_file);
                 let qualified_name =
                     identifying(ClassLiteral::Static(origin).qualified_name(db).to_string());
                 let supertypes: Vec<TypeId> = origin
@@ -861,7 +945,13 @@ impl<'db> TypeRegistry<'db> {
 
             Type::KnownInstance(ki) => {
                 let display = self.display_string(ty, db);
-                let class_name = ki.class(db).name(python_version).to_string();
+                let known_class = ki.class(db);
+                let class_name = known_class.name(python_version).to_string();
+                // Resolved through the class literal so the module comes from the
+                // same path as every other descriptor's.
+                let module_name = known_class
+                    .try_to_class_literal(db, &self.env)
+                    .and_then(|cl| self.resolve_module_name(db, cl.file(db)));
 
                 let is_non_empty = match ki {
                     KnownInstanceType::Range { is_non_empty } => Some(is_non_empty),
@@ -888,6 +978,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::KnownInstance {
                     display,
                     class_name,
+                    module_name,
                     known_instance_kind: Self::known_instance_kind_str(ki),
                     is_non_empty,
                     wrapped_type,

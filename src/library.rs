@@ -1,0 +1,259 @@
+use std::collections::BTreeMap;
+
+use ruff_db::files::system_path_to_file;
+use ruff_db::system::{SystemPath, SystemPathBuf};
+use rustc_hash::FxHashSet;
+use ty_module_resolver::{ResolverFile, all_modules};
+use ty_project::ProjectDatabase;
+use ty_python_core::{ProgramFile, global_scope};
+use ty_python_semantic::Program;
+use ty_python_semantic::types::ProgramEnvironment;
+use ty_python_semantic::types::list_members::all_end_of_scope_members;
+
+use crate::protocol::{LibraryModuleInfo, LibrarySymbolInfo};
+use crate::registry::TypeRegistry;
+
+struct DiscoveredModule {
+    /// Absolute path to the chosen file (`.pyi` preferred over `.py`).
+    abs: SystemPathBuf,
+    /// Path relative to the root's parent, e.g. "mypkg/core.py".
+    rel: String,
+}
+
+/// Which of the two visibility filters are relaxed for a request.
+#[derive(Clone, Copy, Default)]
+pub struct Visibility {
+    pub include_private_modules: bool,
+    pub include_non_exported_symbols: bool,
+}
+
+/// True for a path component that marks a private module/package by the
+/// underscore convention (`_internal`, `_impl`), but NOT for dunders such as
+/// `__init__` / `__main__` / `__pycache__`.
+fn is_private_component(comp: &str) -> bool {
+    comp.starts_with('_') && !(comp.starts_with("__") && comp.ends_with("__"))
+}
+
+/// Whether a module-level symbol is public. With `__all__` present, membership
+/// in it is authoritative; otherwise underscore-prefixed names are private.
+fn is_public_symbol(
+    name: &str,
+    dunder_all: Option<&rustc_hash::FxHashSet<ruff_python_ast::name::Name>>,
+) -> bool {
+    match dunder_all {
+        Some(names) => names.iter().any(|n| n.as_str() == name),
+        None => !name.starts_with('_'),
+    }
+}
+
+/// Walk `root` for importable module files. `.pyi` wins over `.py` for the same
+/// module; unless `include_private` is set, files/dirs with an underscore-private
+/// path component are skipped. A root that is itself a module file yields that one
+/// module, taken as named regardless of the underscore convention.
+fn discover_module_files(
+    root: &SystemPath,
+    include_private: bool,
+) -> anyhow::Result<Vec<DiscoveredModule>> {
+    let root_std = std::path::Path::new(root.as_str());
+    // Relative paths carry the root's own name, so they are built against its parent.
+    let base = root_std.parent().unwrap_or(root_std);
+
+    if root_std.is_file() {
+        let rel = root_std
+            .strip_prefix(base)
+            .unwrap_or(root_std)
+            .to_string_lossy()
+            .into_owned();
+        return Ok(vec![DiscoveredModule {
+            abs: SystemPathBuf::from(root.as_str()),
+            rel,
+        }]);
+    }
+
+    // key = module path relative to base WITHOUT extension; value = chosen file
+    let mut chosen: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut stack = vec![root_std.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+
+            if file_type.is_dir() {
+                if name == "__pycache__" || (!include_private && is_private_component(&name)) {
+                    continue;
+                }
+                stack.push(path);
+            } else if file_type.is_file() {
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                if ext != "py" && ext != "pyi" {
+                    continue;
+                }
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if !include_private && is_private_component(stem) {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(base) else {
+                    continue;
+                };
+                let key = rel.with_extension("").to_string_lossy().into_owned();
+                // Prefer .pyi: insert unless an already-chosen file is a stub.
+                let keep_existing = chosen
+                    .get(&key)
+                    .and_then(|p| p.extension().and_then(|e| e.to_str()))
+                    == Some("pyi");
+                if !keep_existing {
+                    chosen.insert(key, path);
+                }
+            }
+        }
+    }
+
+    let mut modules = Vec::new();
+    for (_key, abs_std) in chosen {
+        let rel = abs_std
+            .strip_prefix(base)
+            .unwrap_or(&abs_std)
+            .to_string_lossy()
+            .into_owned();
+        let Ok(abs) = SystemPathBuf::from_path_buf(abs_std) else {
+            continue;
+        };
+        modules.push(DiscoveredModule { abs, rel });
+    }
+    Ok(modules)
+}
+
+/// Register the public top-level symbols of each `(module_name, file, rel)` into
+/// the registry, producing one `LibraryModuleInfo` per module.
+fn collect_modules<'db>(
+    db: &'db ProjectDatabase,
+    program: Program<'db>,
+    items: impl IntoIterator<Item = (String, ruff_db::files::File, String)>,
+    include_non_exported: bool,
+    registry: &mut TypeRegistry<'db>,
+) -> Vec<LibraryModuleInfo> {
+    let mut modules = Vec::new();
+    for (name, file, rel) in items {
+        let program_file = ProgramFile::new(db, file, program);
+        let scope = global_scope(db, program_file);
+        let dunder_all = ty_python_semantic::dunder_all::dunder_all_names(db, program_file);
+
+        let mut symbols = Vec::new();
+        // Members arrive as all declarations followed by all bindings, so a
+        // declared-and-bound name yields two. Keeping the first gives the
+        // declared type precedence.
+        let mut seen = FxHashSet::default();
+        for mwd in all_end_of_scope_members(db, scope) {
+            let sym_name = mwd.member.name.as_str();
+            if !include_non_exported && !is_public_symbol(sym_name, dunder_all) {
+                continue;
+            }
+            if !seen.insert(sym_name.to_string()) {
+                continue;
+            }
+            let type_id = registry.register(mwd.member.ty, db).type_id;
+            symbols.push(LibrarySymbolInfo {
+                name: sym_name.to_string(),
+                type_id,
+            });
+        }
+        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        modules.push(LibraryModuleInfo {
+            name,
+            file: rel,
+            symbols,
+        });
+    }
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    modules
+}
+
+/// Extract the public API of the distribution installed at `roots`. `registry`
+/// should be constructed with `Boundary::UnderRoots(roots)` so types defined
+/// outside them collapse to `classRef`.
+pub fn extract_library_api<'db>(
+    db: &'db ProjectDatabase,
+    program: Program<'db>,
+    roots: &[SystemPathBuf],
+    visibility: Visibility,
+    registry: &mut TypeRegistry<'db>,
+) -> anyhow::Result<Vec<LibraryModuleInfo>> {
+    let env = ProgramEnvironment::from_program(program);
+    let resolver_env = env.resolver_environment(db);
+    let mut items = Vec::new();
+    let mut seen = FxHashSet::default();
+
+    // Modules that ty cannot resolve to a dotted name (e.g. a stray file with no
+    // reachable package chain) are silently skipped — they are not part of any
+    // importable public API.
+    for root in roots {
+        for discovered in discover_module_files(root.as_path(), visibility.include_private_modules)?
+        {
+            let Ok(file) = system_path_to_file(db, discovered.abs.as_path()) else {
+                continue;
+            };
+            let resolver_file = ResolverFile::new(db, file, resolver_env);
+            let Some(module) = ty_module_resolver::file_to_module(db, resolver_file) else {
+                continue;
+            };
+            // Nested or repeated roots can reach the same file twice.
+            if !seen.insert(file) {
+                continue;
+            }
+            items.push((module.name(db).to_string(), file, discovered.rel));
+        }
+    }
+
+    Ok(collect_modules(
+        db,
+        program,
+        items,
+        visibility.include_non_exported_symbols,
+        registry,
+    ))
+}
+
+/// Extract the public API of the standard library. `requested` is the set of
+/// top-level module names to emit; empty ⇒ all stdlib modules. Build `registry`
+/// with `TypeRegistry::with_boundary_modules(local_set)` (or no boundary when
+/// every stdlib module is local).
+pub fn extract_stdlib_api<'db>(
+    db: &'db ProjectDatabase,
+    program: Program<'db>,
+    requested: &FxHashSet<String>,
+    registry: &mut TypeRegistry<'db>,
+) -> Vec<LibraryModuleInfo> {
+    let env = ProgramEnvironment::from_program(program);
+    let mut items = Vec::new();
+    for module in all_modules(db, env.resolver_environment(db)) {
+        let is_stdlib = module
+            .search_path(db)
+            .is_some_and(|sp| sp.is_standard_library());
+        if !is_stdlib {
+            continue;
+        }
+        let name = module.name(db).to_string();
+        let top = name.split('.').next().unwrap_or(name.as_str());
+        // `_typeshed` is typeshed's internal helper package, not an importable module.
+        if top == "_typeshed" {
+            continue;
+        }
+        if !requested.is_empty() && !requested.contains(top) {
+            continue;
+        }
+        let Some(file) = module.file(db) else {
+            continue;
+        };
+        items.push((name.clone(), file, name));
+    }
+    collect_modules(db, program, items, false, registry)
+}

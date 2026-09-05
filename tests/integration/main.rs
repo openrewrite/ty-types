@@ -1904,3 +1904,36 @@ fn a_narrowed_reference_still_reports_the_reachable_branch() {
         "both references must name the branch live on this platform"
     );
 }
+
+#[test]
+fn an_unidentifiable_class_reports_no_qualified_name() {
+    // ty spells a class built from a runtime name `<unknown>`. Two of them in one
+    // scope render identically, and clients key a class by this field.
+    let dir = create_test_project(&[(
+        "anon.py",
+        "def g(n: str, m: str):\n    C = type(n, (), {\"a\": 1})\n    D = type(m, (), {\"b\": \"s\"})\n    return C(), D()\n",
+    )]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &get_types_request("anon.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types = responses.iter().find(|r| r["id"] == 2).unwrap()["result"]["types"]
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let unknown: Vec<&str> = types
+        .values()
+        .filter_map(|t| t["qualifiedName"].as_str())
+        .filter(|q| q.contains("<unknown>"))
+        .collect();
+
+    assert!(
+        unknown.is_empty(),
+        "a name that cannot identify a class must be omitted, got {unknown:?}"
+    );
+}

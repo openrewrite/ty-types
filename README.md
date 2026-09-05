@@ -218,7 +218,7 @@ Every type in the registry is a tagged object with a `"kind"` discriminator. All
 
 Fields marked with *"omitted when empty"* are not present in the JSON when their value is empty or null.
 
-`qualifiedName`, wherever it appears below, is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`. Scopes other than modules and classes appear as ty spells them, so a class defined inside a function reads `a.<locals of function 'f'>.C` — split it on `.` only if that spelling is accounted for.
+`qualifiedName`, wherever it appears below, is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`. Scopes other than modules and classes appear as ty spells them, so a class defined inside a function reads `a.<locals of function 'f'>.C` — split it on `.` only if that spelling is accounted for. It is omitted where it would not identify the class: ty names a class built from a runtime name `<unknown>`, and two such classes in one scope render identically.
 
 #### `instance`
 

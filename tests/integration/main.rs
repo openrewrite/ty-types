@@ -1620,13 +1620,13 @@ fn get_types_with_bindings_request(file: &str, id: u64) -> String {
     .to_string()
 }
 
-/// Returns the `binding` of the one node of `node_kind` spanning exactly `text`.
-fn binding_at(
-    nodes: &[serde_json::Value],
+/// Returns the one node of `node_kind` spanning exactly `text`.
+fn node_at<'a>(
+    nodes: &'a [serde_json::Value],
     source: &str,
     node_kind: &str,
     text: &str,
-) -> serde_json::Value {
+) -> &'a serde_json::Value {
     let matches: Vec<&serde_json::Value> = nodes
         .iter()
         .filter(|n| {
@@ -1642,7 +1642,17 @@ fn binding_at(
         "expected exactly one {node_kind} node spanning {text:?}, got {}",
         matches.len()
     );
-    matches[0]["binding"].clone()
+    matches[0]
+}
+
+/// Returns the `binding` of the one node of `node_kind` spanning exactly `text`.
+fn binding_at(
+    nodes: &[serde_json::Value],
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    node_at(nodes, source, node_kind, text)["binding"].clone()
 }
 
 #[test]
@@ -1936,4 +1946,110 @@ fn an_unidentifiable_class_reports_no_qualified_name() {
         unknown.is_empty(),
         "a name that cannot identify a class must be omitted, got {unknown:?}"
     );
+}
+
+/// Fixture: `f` declared on `A` and on `C`, with `B` in between declaring nothing,
+/// so the class that declares what `super().f` resolves to is neither the pivot
+/// (`C`) nor the next class in the MRO (`B`).
+fn skipped_mro_level_project() -> tempfile::TempDir {
+    create_test_project(&[(
+        "mro.py",
+        "class A:\n\
+         \x20   def f(self) -> int:\n\
+         \x20       return 1\n\
+         \n\
+         class B(A):\n\
+         \x20   pass\n\
+         \n\
+         class C(B):\n\
+         \x20   def f(self) -> str:\n\
+         \x20       return \"c\"\n\
+         \n\
+         \x20   def go(self):\n\
+         \x20       self.f()\n\
+         \x20       super().f()\n\
+         \n\
+         \x20   def helper(self):\n\
+         \x20       def inner() -> None: ...\n\
+         \x20       return inner\n\
+         \n\
+         def top() -> None: ...\n",
+    )])
+}
+
+/// Returns the descriptor of the one node of `node_kind` spanning exactly `text`.
+fn descriptor_at(
+    nodes: &[serde_json::Value],
+    types: &TypeMap,
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    let type_id = node_at(nodes, source, node_kind, text)["typeId"]
+        .as_u64()
+        .expect("node should be typed");
+    types[&type_id.to_string()].clone()
+}
+
+fn mro_fixture_response() -> (tempfile::TempDir, String, Vec<serde_json::Value>, TypeMap) {
+    let dir = skipped_mro_level_project();
+    let source = std::fs::read_to_string(dir.path().join("mro.py")).unwrap();
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("mro.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    (dir, source, nodes, types)
+}
+
+#[test]
+fn test_a_method_names_the_class_that_declares_it() {
+    let (_dir, source, nodes, types) = mro_fixture_response();
+
+    let qualified_name_of = |descriptor: &serde_json::Value| {
+        let class_id = descriptor["declaringClassId"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("expected a declaringClassId, got {descriptor}"));
+        types[&class_id.to_string()]["qualifiedName"].clone()
+    };
+
+    let over_super = descriptor_at(&nodes, &types, &source, "ExprAttribute", "super().f");
+    assert_eq!(qualified_name_of(&over_super), "mro.A");
+
+    let over_self = descriptor_at(&nodes, &types, &source, "ExprAttribute", "self.f");
+    assert_eq!(qualified_name_of(&over_self), "mro.C");
+}
+
+#[test]
+fn test_a_super_receiver_reports_its_pivot_class_and_receiver() {
+    let (_dir, source, nodes, types) = mro_fixture_response();
+
+    let receiver = descriptor_at(&nodes, &types, &source, "ExprCall", "super()");
+    assert_eq!(receiver["kind"], "super");
+
+    let pivot = &types[&receiver["pivotClassId"].as_u64().unwrap().to_string()];
+    assert_eq!(pivot["qualifiedName"], "mro.C");
+
+    // Implicitly `self` inside a method body.
+    let bound_to = &types[&receiver["receiverId"].as_u64().unwrap().to_string()];
+    assert_eq!(bound_to["kind"], "typeVar");
+    assert_eq!(bound_to["name"], "Self");
+}
+
+#[test]
+fn test_a_function_outside_a_class_body_names_no_declaring_class() {
+    let (_dir, _source, _nodes, types) = mro_fixture_response();
+
+    let function_named = |name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "function" && t["name"] == name)
+            .unwrap_or_else(|| panic!("expected a function descriptor for {name}"))
+    };
+
+    assert!(function_named("top")["declaringClassId"].is_null());
+    // A method body encloses `inner`, but does not declare it.
+    assert!(function_named("inner")["declaringClassId"].is_null());
 }

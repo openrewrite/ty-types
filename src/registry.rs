@@ -1,6 +1,9 @@
 use rustc_hash::FxHashMap;
 use ty_module_resolver::ResolverFile;
+use ty_python_core::semantic_index;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
+use ty_python_semantic::types::function::FunctionType;
+use ty_python_semantic::types::infer::original_class_type;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
 use ty_python_semantic::types::tuple::{Tuple, VariableSegment};
@@ -118,6 +121,17 @@ impl<'db> TypeRegistry<'db> {
     fn resolve_module_name(&self, db: &'db dyn Db, file: ruff_db::files::File) -> Option<String> {
         let resolver_file = ResolverFile::new(db, file, self.env.resolver_environment(db));
         ty_module_resolver::file_to_module(db, resolver_file).map(|m| m.name(db).to_string())
+    }
+
+    /// The class whose body declares `func`, or `None` when `func` is not a method.
+    fn declaring_class_id(&mut self, func: FunctionType<'db>, db: &'db dyn Db) -> Option<TypeId> {
+        // Reached through `body_scope`: `FunctionType::definition` would add a
+        // dependency on the full AST of the defining module.
+        let body_scope = func.first_overload_or_implementation(db).body_scope(db);
+        let index = semantic_index(db, body_scope.program_file(db));
+        let class = index.class_definition_of_method(body_scope.file_scope_id(db))?;
+        let class_literal = original_class_type(db, class)?;
+        Some(self.register_component(Type::ClassLiteral(class_literal), db))
     }
 
     fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
@@ -612,11 +626,13 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
                 let module_name = self.resolve_module_name(db, func.file(db));
+                let declaring_class_id = self.declaring_class_id(func, db);
                 let (type_parameters, parameters, return_type) = self.build_function_params(ty, db);
                 TypeDescriptor::Function {
                     display,
                     name,
                     module_name,
+                    declaring_class_id,
                     type_parameters,
                     parameters,
                     return_type,
@@ -659,6 +675,7 @@ impl<'db> TypeRegistry<'db> {
                     _ => None,
                 };
                 let module_name = self.resolve_module_name(db, func.file(db));
+                let declaring_class_id = self.declaring_class_id(func, db);
                 let (type_parameters, parameters, return_type) =
                     self.build_function_params(func_ty, db);
                 TypeDescriptor::BoundMethod {
@@ -666,6 +683,7 @@ impl<'db> TypeRegistry<'db> {
                     name,
                     class_name,
                     module_name,
+                    declaring_class_id,
                     type_parameters,
                     parameters,
                     return_type,
@@ -685,6 +703,7 @@ impl<'db> TypeRegistry<'db> {
                     name: None,
                     class_name,
                     module_name: None,
+                    declaring_class_id: None,
                     type_parameters,
                     parameters,
                     return_type,
@@ -940,10 +959,21 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
+            Type::BoundSuper(bound_super) => {
+                let display = self.display_string(ty, db);
+                let pivot_class_id =
+                    self.register_component(Type::from(bound_super.pivot_class(db)), db);
+                let receiver_id = self.register_component(bound_super.owner(db).owner_type(), db);
+                TypeDescriptor::Super {
+                    display,
+                    pivot_class_id,
+                    receiver_id,
+                }
+            }
+
             Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
             | Type::SlotDescriptor(_)
-            | Type::BoundSuper(_)
             | Type::Divergent(_) => {
                 let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }

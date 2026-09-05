@@ -70,12 +70,13 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
 | `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
+| `super` | Bound `super` object (`super()`, `super(C, obj)`). Neither field names the class declaring what an attribute on it resolves to — read `declaringClassId` off the attribute | `pivotClassId`, `receiverId` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |
-| `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `typeParameters`, `parameters`, `returnType` |
+| `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `declaringClassId`, `typeParameters`, `parameters`, `returnType` |
 | `callable` | Anonymous callable (`Callable[[int], str]`) | `parameters`, `returnType` |
-| `boundMethod` | Bound method (`obj.method`) | `name`, `className`, `moduleName`, `typeParameters`, `parameters`, `returnType` |
+| `boundMethod` | Bound method (`obj.method`). `className` is the receiver's class, `declaringClassId` the class declaring the method; they disagree on an inherited method | `name`, `className`, `moduleName`, `declaringClassId`, `typeParameters`, `parameters`, `returnType` |
 | `wrapperDescriptor` | Descriptor wrapper (`__get__`, `__set__`) | `descriptorKind`, `parameters`, `returnType` |
 | `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`, `functools.partial(...)`, `range(...)`) | `className`, `knownInstanceKind`, `isNonEmpty`, `wrappedType`, `parameters`, `returnType` |
 | `intLiteral` | Literal int | `value` |

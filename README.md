@@ -259,6 +259,19 @@ A `type[C]` constraint (subclass relationship).
 |---|---|---|
 | `base` | `integer` | Type ID of the base: a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` |
 
+#### `super`
+
+A bound `super` object: `super()` or `super(C, obj)`.
+
+| Field | Type | Description |
+|---|---|---|
+| `pivotClassId` | `integer` | Type ID of the class the attribute lookup starts *after* in the receiver's MRO — `C` for `super(C, obj)`, the enclosing class for a bare `super()` |
+| `receiverId` | `integer` | Type ID of `super()`'s second argument, implicit inside a method body (a `Self` `typeVar` there) |
+
+Neither field names the class that declares what a `super()` attribute resolves to, because that is a property of the attribute rather than of the receiver: with `f` declared on `A` and on `C`, `super().f` inside `class C(B)`, `class B(A)` resolves to `A.f`, past a pivot of `C` and a next-in-MRO of `B`. Read `declaringClassId` off the attribute's own `boundMethod` for that.
+
+`super(C)` without a second argument is an instance of `builtins.super` rather than a bound super object, and reports `instance`.
+
 #### `typeForm`
 
 A `TypeForm[T]` value wrapping a type expression (PEP 747).
@@ -318,6 +331,7 @@ A named function.
 |---|---|---|
 | `name` | `string` | Function name |
 | `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `declaringClassId` | `integer` | Type ID of the `classLiteral` whose body declares the function *(omitted for a function that is not a method)* |
 | `typeParameters` | `integer[]` | Generic type parameters *(omitted when empty)* |
 | `parameters` | `ParameterInfo[]` | Full signature |
 | `returnType` | `integer \| null` | Return type ID |
@@ -329,10 +343,14 @@ A method bound to an instance.
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string \| null` | Method name *(omitted when empty)* |
+| `className` | `string \| null` | The receiver's class, set when the receiver is a nominal or protocol instance *(a literal or `Self` receiver reports none, though `declaringClassId` still resolves: `"".join` names `builtins.str`)* |
 | `moduleName` | `string \| null` | Defining module *(omitted when empty)* |
+| `declaringClassId` | `integer` | Type ID of the `classLiteral` whose body declares the method *(omitted when there is no such class)* |
 | `typeParameters` | `integer[]` | Generic type parameters *(omitted when empty)* |
-| `parameters` | `ParameterInfo[]` | Full signature (without `self`) |
+| `parameters` | `ParameterInfo[]` | Full signature, `self` included |
 | `returnType` | `integer \| null` | Return type ID |
+
+`className` and `declaringClassId` answer different questions and disagree on an inherited method: `Child().greet()`, with `greet` declared on `Base`, reports `className: "Child"` and a `declaringClassId` naming `Base`. The declaring class is the one a method pattern matches.
 
 #### `callable`
 

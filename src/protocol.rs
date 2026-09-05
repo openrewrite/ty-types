@@ -256,6 +256,17 @@ pub enum TypeDescriptor {
         base: TypeId,
     },
 
+    // super() / super(C, obj)
+    #[serde(rename_all = "camelCase")]
+    Super {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        /// The class the attribute lookup starts *after* in the receiver's MRO.
+        pivot_class_id: TypeId,
+        /// `super()`'s second argument, implicit inside a method body.
+        receiver_id: TypeId,
+    },
+
     // TypeForm[T] — PEP 747 type-form value wrapping a type expression
     #[serde(rename_all = "camelCase")]
     TypeForm {
@@ -287,6 +298,10 @@ pub enum TypeDescriptor {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        /// The class whose body declares this function. Absent for a function that is
+        /// not a method.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declaring_class_id: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,
@@ -310,10 +325,14 @@ pub enum TypeDescriptor {
         display: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// The receiver's class. An inherited method reports the subclass here and
+        /// the class declaring it under `declaring_class_id`.
         #[serde(skip_serializing_if = "Option::is_none")]
         class_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declaring_class_id: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,
@@ -547,6 +566,7 @@ impl TypeDescriptor {
             Self::Instance { display, .. }
             | Self::ClassLiteral { display, .. }
             | Self::SubclassOf { display, .. }
+            | Self::Super { display, .. }
             | Self::TypeForm { display, .. }
             | Self::Union { display, .. }
             | Self::Intersection { display, .. }

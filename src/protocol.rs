@@ -71,6 +71,8 @@ pub struct GetTypesParams {
     pub file: String,
     #[serde(default = "default_true")]
     pub include_display: bool,
+    #[serde(default)]
+    pub include_bindings: bool,
 }
 
 fn default_true() -> bool {
@@ -177,6 +179,20 @@ pub struct NodeAttribution {
     pub type_id: Option<TypeId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_signature: Option<CallSignatureInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<BindingInfo>,
+}
+
+/// Where a referenced symbol is bound, resolved through re-export chains to the
+/// original binding. See README.md: BindingInfo.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingInfo {
+    /// Module holding the binding, e.g. `pkg._impl`.
+    pub defined_in: String,
+    /// Dotted path including enclosing classes, e.g. `pkg._impl.SEP`,
+    /// `app.Holder.MAX`. `definedIn` says where the module part ends.
+    pub qualified_name: String,
 }
 
 // ─── Call signature info ─────────────────────────────────────────────
@@ -321,6 +337,17 @@ pub enum TypeDescriptor {
         base: TypeId,
     },
 
+    // super() / super(C, obj)
+    #[serde(rename_all = "camelCase")]
+    Super {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+        /// The class the attribute lookup starts *after* in the receiver's MRO.
+        pivot_class_id: TypeId,
+        /// `super()`'s second argument, implicit inside a method body.
+        receiver_id: TypeId,
+    },
+
     // TypeForm[T] — PEP 747 type-form value wrapping a type expression
     #[serde(rename_all = "camelCase")]
     TypeForm {
@@ -352,6 +379,10 @@ pub enum TypeDescriptor {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        /// The class whose body declares this function. Absent for a function that is
+        /// not a method.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declaring_class_id: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,
@@ -375,10 +406,14 @@ pub enum TypeDescriptor {
         display: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// The receiver's class. An inherited method reports the subclass here and
+        /// the class declaring it under `declaring_class_id`.
         #[serde(skip_serializing_if = "Option::is_none")]
         class_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         module_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        declaring_class_id: Option<TypeId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         type_parameters: Vec<TypeId>,
         parameters: Vec<ParameterInfo>,
@@ -618,6 +653,7 @@ impl TypeDescriptor {
             | Self::ClassLiteral { display, .. }
             | Self::ClassRef { display, .. }
             | Self::SubclassOf { display, .. }
+            | Self::Super { display, .. }
             | Self::TypeForm { display, .. }
             | Self::Union { display, .. }
             | Self::Intersection { display, .. }

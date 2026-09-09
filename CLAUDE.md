@@ -20,6 +20,7 @@ The registry persists across getTypes requests within a session. This works beca
 cargo check                          # Type-check
 cargo build                          # Build debug binary
 cargo build --release                # Build release binary
+cargo test --profile fast-test       # Run tests — use this, not --release
 
 # Smoke test
 echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/project"},"id":1}
@@ -27,11 +28,20 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 {"jsonrpc":"2.0","method":"shutdown","id":99}' | cargo run
 ```
 
+Always run the suite under `fast-test`. The `release` profile links with fat LTO
+over the whole ruff graph at `codegen-units = 1`, and `cargo test` pays that twice
+— once for the binary the integration tests spawn, once for the test binary — so a
+one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The 45
+tests themselves take seconds either way. `fast-test`'s first build compiles ruff
+from scratch (~9 min, once per checkout).
+
+Reach for `--release` only to measure inference speed or ship a binary.
+
 ## Key Constraints
 
 - The `ruff/` submodule is pinned to a specific commit on `openrewrite/ruff` `ty-types-2` branch, which widens `pub(crate)` → `pub` across `ty_python_semantic`. This gives us access to structured type internals (callable signatures, type var bounds, known instance classes, etc.).
 - Update the submodule with `cd ruff && git fetch origin ty-types-2 && git checkout origin/ty-types-2`.
-- Rust edition 2024, requires Rust 1.95+.
+- Rust edition 2024, requires Rust 1.96+.
 
 ## Wire Protocol
 
@@ -45,6 +55,18 @@ Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `getStdli
 
 `initialize` accepts an optional first-party boundary that the session's `getTypes` registry honors: `firstPartyRoot` (a package root path) or `firstPartyModules` (top-level module names; used when `firstPartyRoot` is absent). When set, `getTypes` emits classes defined outside the boundary as `classRef` instead of fully expanding them; with neither field, every class is fully expanded (default behavior). `firstPartyRoot` takes precedence if both are given.
 
+A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
+
+Any file can fail: ty's inference panics on some inputs. `collector::catch_collect` confines that to the one file, so drive inference through it — a bare `collect_types` call lets one bad file abort the whole process. See README.md: getTypes.
+
+### Backwards compatibility
+
+Clients — rewrite-python, moderne-cli's `PythonTypeMapping` — upgrade this binary on their own schedule, so treat the wire format as a published contract. Keep changes additive: a new request parameter takes `#[serde(default)]`, and a new response field is `Option` with `skip_serializing_if`, so a client that neither sends nor reads it sees the output it saw before. Where a feature costs real time or payload, put it behind a request flag that defaults off, as `includeDisplay` and `includeBindings` do.
+
+Removing a field, renaming one, changing its type, or changing what an existing one means all break clients and need a version bump. Releases are tagged `v0.0.N` and the workflow rewrites the placeholder `version = "0.0.0"`, so a breaking release means moving the minor — `v0.1.0` — rather than continuing the patch series.
+
+Confirm compatibility by running the previous binary and the new one over the same corpus and comparing. `files` and `types` are `HashMap`s that serialize in a different order on every run, so compare parsed JSON; a byte diff reports a difference either way and tells you nothing.
+
 ## TypeDescriptor Variants
 
 Each type in the registry is represented as a `TypeDescriptor` with a `kind` discriminator:
@@ -53,14 +75,15 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 |------|-------------|------------|
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
-| `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
 | `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName`, `qualifiedName` |
+| `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
+| `super` | Bound `super` object (`super()`, `super(C, obj)`). Neither field names the class declaring what an attribute on it resolves to — read `declaringClassId` off the attribute | `pivotClassId`, `receiverId` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |
 | `union` | Union type (`X \| Y`) | `members` |
 | `intersection` | Intersection type | `positive`, `negative` |
-| `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `typeParameters`, `parameters`, `returnType` |
+| `function` | Named function (`def foo(...)`) | `name`, `moduleName`, `declaringClassId`, `typeParameters`, `parameters`, `returnType` |
 | `callable` | Anonymous callable (`Callable[[int], str]`) | `parameters`, `returnType` |
-| `boundMethod` | Bound method (`obj.method`) | `name`, `className`, `moduleName`, `typeParameters`, `parameters`, `returnType` |
+| `boundMethod` | Bound method (`obj.method`). `className` is the receiver's class, `declaringClassId` the class declaring the method; they disagree on an inherited method | `name`, `className`, `moduleName`, `declaringClassId`, `typeParameters`, `parameters`, `returnType` |
 | `wrapperDescriptor` | Descriptor wrapper (`__get__`, `__set__`) | `descriptorKind`, `parameters`, `returnType` |
 | `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`, `functools.partial(...)`, `range(...)`) | `className`, `knownInstanceKind`, `isNonEmpty`, `wrappedType`, `parameters`, `returnType` |
 | `intLiteral` | Literal int | `value` |
@@ -85,4 +108,4 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 
 All variants include an optional `display` field with ty's string representation.
 
-`qualifiedName` is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`) — the field to key a class by. See README.md for the per-variant field tables.
+`qualifiedName` is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`) — the field to key a class by. A function scope appears as ty spells it (`a.<locals of function 'f'>.C`), so it is not safe to split on `.`. Omitted where it would not identify the class — see `identifying` in registry.rs. See README.md for the per-variant field tables.

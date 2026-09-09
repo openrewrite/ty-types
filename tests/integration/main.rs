@@ -1692,6 +1692,40 @@ fn test_library_class_ref_qualified_name_joins_across_boundary() {
 }
 
 #[test]
+fn test_library_class_ref_omits_unidentifiable_qualified_name() {
+    let dir = create_test_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "mypkg/anon.py",
+            "import sys\n\nC = type(sys.argv[0], (), {\"a\": 1})\nD = type(sys.argv[1], (), {\"b\": \"s\"})\n",
+        ),
+        ("otherpkg/__init__.py", ""),
+        ("otherpkg/use.py", "from mypkg.anon import C, D\n"),
+    ]);
+    let otherpkg = dir.path().join("otherpkg");
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_library_api_roots_request(&[otherpkg.to_str().unwrap()], &[], 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    let refs: Vec<_> = types
+        .values()
+        .filter(|t| t["kind"] == "classRef" && t["className"] == "<unknown>")
+        .collect();
+
+    assert_eq!(refs.len(), 2, "both runtime-named classes should be refs");
+    for r in refs {
+        assert!(
+            r["qualifiedName"].is_null(),
+            "both refs would carry `mypkg.anon.<unknown>`, joining as one class, got {r}"
+        );
+    }
+}
+
+#[test]
 fn test_library_file_root() {
     // pytest installs a bare `py.py` alongside its packages; single-module
     // distributions are the same shape.
@@ -2490,5 +2524,651 @@ fn test_non_tuple_instance_has_no_tuple_elements() {
     assert!(
         list.get("tupleElements").is_none(),
         "non-tuple instance should omit tupleElements: {list:?}"
+    );
+}
+
+/// Fixture: a package whose `__init__.py` re-exports constants defined in a
+/// submodule, and a consumer reaching them by alias and by module attribute.
+fn reexported_constants_project() -> tempfile::TempDir {
+    create_test_project(&[
+        ("pkg/_impl.py", "SEP: str = \"/\"\nLIMIT = 5\n"),
+        ("pkg/__init__.py", "from pkg._impl import SEP, LIMIT\n"),
+        (
+            "main.py",
+            "import pkg\nfrom pkg import SEP as SEPARATOR\n\nprint(SEPARATOR)\nprint(pkg.LIMIT)\n",
+        ),
+    ])
+}
+
+fn get_types_with_bindings_request(file: &str, id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getTypes",
+        "params": {"file": file, "includeBindings": true},
+        "id": id
+    })
+    .to_string()
+}
+
+/// Returns the one node of `node_kind` spanning exactly `text`.
+fn node_at<'a>(
+    nodes: &'a [serde_json::Value],
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> &'a serde_json::Value {
+    let matches: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| {
+            n["nodeKind"] == node_kind
+                && &source
+                    [n["start"].as_u64().unwrap() as usize..n["end"].as_u64().unwrap() as usize]
+                    == text
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one {node_kind} node spanning {text:?}, got {}",
+        matches.len()
+    );
+    matches[0]
+}
+
+/// Returns the `binding` of the one node of `node_kind` spanning exactly `text`.
+fn binding_at(
+    nodes: &[serde_json::Value],
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    node_at(nodes, source, node_kind, text)["binding"].clone()
+}
+
+#[test]
+fn test_binding_follows_reexport_chain_for_name_and_attribute_references() {
+    let dir = reexported_constants_project();
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    // An annotated assignment: its value type reports `builtins`, and its name
+    // needs the fallback in `definition_name_of`.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "SEPARATOR"),
+        serde_json::json!({"definedIn": "pkg._impl", "qualifiedName": "pkg._impl.SEP"}),
+    );
+
+    // Reached as a module attribute rather than an imported name.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprAttribute", "pkg.LIMIT"),
+        serde_json::json!({"definedIn": "pkg._impl", "qualifiedName": "pkg._impl.LIMIT"}),
+    );
+}
+
+#[test]
+fn test_binding_qualified_name_carries_the_enclosing_class() {
+    let dir = create_test_project(&[(
+        "cls.py",
+        "class Holder:\n    MAX = 10\n\n\nprint(Holder.MAX)\n",
+    )]);
+    let source = std::fs::read_to_string(dir.path().join("cls.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("cls.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprAttribute", "Holder.MAX"),
+        serde_json::json!({"definedIn": "cls", "qualifiedName": "cls.Holder.MAX"}),
+    );
+}
+
+/// Fixture: `NAME` bound in both arms of a `sys.platform` conditional, with the
+/// arms' bodies supplied by the caller. The platform is pinned so the `else` arm
+/// is the live one on every host.
+fn platform_conditional_project(win_body: &str, posix_body: &str) -> tempfile::TempDir {
+    create_test_project(&[
+        ("ty.toml", "[environment]\npython-platform = \"linux\"\n"),
+        ("pkg/_win.py", win_body),
+        ("pkg/_posix.py", posix_body),
+        (
+            "pkg/__init__.py",
+            "import sys\n\nif sys.platform == \"win32\":\n    from pkg._win import NAME\nelse:\n    from pkg._posix import NAME\n",
+        ),
+        ("main.py", "from pkg import NAME\n\nprint(NAME)\n"),
+    ])
+}
+
+fn assert_binds_to_posix_arm(dir: &tempfile::TempDir) {
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "NAME"),
+        serde_json::json!({"definedIn": "pkg._posix", "qualifiedName": "pkg._posix.NAME"}),
+    );
+}
+
+#[test]
+fn test_binding_picks_the_branch_matching_the_inferred_type() {
+    // `_win` is the first arm in source order; the inferred `Literal[30]` is what
+    // makes `_posix` the right answer.
+    assert_binds_to_posix_arm(&platform_conditional_project("NAME = 60\n", "NAME = 30\n"));
+}
+
+#[test]
+fn test_binding_matches_a_declared_type_against_the_reference() {
+    // The reference reads as the declared `int`, which no arm's *assigned* type
+    // (`Literal[60]`, `Literal[30]`) equals.
+    assert_binds_to_posix_arm(&platform_conditional_project(
+        "NAME = 60\n",
+        "NAME: int = 30\n",
+    ));
+}
+
+#[test]
+fn test_binding_survives_a_symbol_that_is_declared_before_it_is_bound() {
+    let dir = create_test_project(&[
+        ("cfg.py", "COUNT: int\nCOUNT = 3\n"),
+        ("main.py", "from cfg import COUNT\n\nprint(COUNT)\n"),
+    ]);
+    let source = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_with_bindings_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    // `COUNT: int` declares without binding, and asking ty for its binding type
+    // aborts the process rather than returning.
+    assert_eq!(
+        binding_at(&nodes, &source, "ExprName", "COUNT"),
+        serde_json::json!({"definedIn": "cfg", "qualifiedName": "cfg.COUNT"}),
+    );
+}
+
+#[test]
+fn test_bindings_are_omitted_unless_requested() {
+    let dir = reexported_constants_project();
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("main.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap();
+    assert!(
+        nodes.iter().all(|n| n.get("binding").is_none()),
+        "binding should be absent without includeBindings"
+    );
+}
+
+#[test]
+fn one_file_failing_inference_does_not_end_the_session() {
+    // A shadowing `typing.py` makes `dict(a=1)` panic ty's inference (astral-sh/ty#4454).
+    let dir = create_test_project(&[
+        ("typing.py", ""),
+        ("trigger.py", "f = dict(a=1)\n"),
+        ("good.py", "x: int = 1\n"),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &get_types_request("trigger.py", 2),
+        &get_types_request("good.py", 3),
+        &shutdown_request(99),
+    ]);
+
+    let good = responses
+        .iter()
+        .find(|r| r["id"] == 3)
+        .expect("the request after a failing one must still be answered");
+    assert!(
+        good["result"]["nodes"].is_array() || good["result"]["nodes"].is_object(),
+        "expected types for good.py, got {good}"
+    );
+
+    // Conditional so the test still states something true once ty stops panicking here.
+    let trigger = responses.iter().find(|r| r["id"] == 2).unwrap();
+    if let Some(error) = trigger.get("error") {
+        assert_eq!(error["code"], -32001, "inference failure code");
+        assert!(
+            error["message"].as_str().unwrap().contains("trigger.py"),
+            "the error must name the file: {error}"
+        );
+    }
+}
+
+#[test]
+fn one_shot_emits_the_files_it_could_analyze_and_reports_a_partial_run() {
+    // Same trigger as above: see `one_file_failing_inference_does_not_end_the_session`.
+    let dir = create_test_project(&[
+        ("typing.py", ""),
+        ("trigger.py", "f = dict(a=1)\n"),
+        ("good.py", "x: int = 1\n"),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ty-types"))
+        .args([
+            &format!("{root}/trigger.py"),
+            &format!("{root}/good.py"),
+            "--project-root",
+            root,
+        ])
+        .output()
+        .expect("failed to run ty-types");
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON even on failure");
+    let files = parsed["files"].as_object().unwrap();
+    assert!(
+        files.keys().any(|k| k.ends_with("good.py")),
+        "a file that failed must not suppress the ones that succeeded: {:?}",
+        files.keys().collect::<Vec<_>>()
+    );
+
+    if !files.keys().any(|k| k.ends_with("trigger.py")) {
+        assert!(
+            !output.status.success(),
+            "a skipped file must make the run report failure"
+        );
+    }
+}
+
+#[test]
+fn a_narrowed_reference_still_reports_the_reachable_branch() {
+    // `isinstance` narrows `NAME` to `int` at the second reference, which is also
+    // what the dead `_win` branch declares.
+    let dir = create_test_project(&[
+        ("ty.toml", "[environment]\npython-platform = \"linux\"\n"),
+        ("pkg/_win.py", "NAME: int = 60\n"),
+        ("pkg/_posix.py", "NAME: int | str = 30\n"),
+        (
+            "pkg/__init__.py",
+            "import sys\nif sys.platform == \"win32\":\n    from ._win import NAME\nelse:\n    from ._posix import NAME\n",
+        ),
+        (
+            "main.py",
+            "from pkg import NAME\nif isinstance(NAME, int):\n    print(NAME)\n",
+        ),
+    ]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "getTypes",
+            "params": {"file": "main.py", "includeBindings": true}, "id": 2
+        })
+        .to_string(),
+        &shutdown_request(99),
+    ]);
+
+    let nodes = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .expect("getTypes must answer")["result"]["nodes"]
+        .as_array()
+        .unwrap()
+        .clone();
+
+    let bindings: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprName")
+        .filter_map(|n| n["binding"]["qualifiedName"].as_str())
+        .filter(|q| q.ends_with(".NAME"))
+        .collect();
+
+    assert_eq!(
+        bindings,
+        vec!["pkg._posix.NAME", "pkg._posix.NAME"],
+        "both references must name the branch live on this platform"
+    );
+}
+
+#[test]
+fn an_unidentifiable_class_reports_no_qualified_name() {
+    // ty spells a class built from a runtime name `<unknown>`. Two of them in one
+    // scope render identically, and clients key a class by this field.
+    let dir = create_test_project(&[(
+        "anon.py",
+        "def g(n: str, m: str):\n    C = type(n, (), {\"a\": 1})\n    D = type(m, (), {\"b\": \"s\"})\n    return C(), D()\n",
+    )]);
+    let root = dir.path().to_str().unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root, 1),
+        &get_types_request("anon.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types = responses.iter().find(|r| r["id"] == 2).unwrap()["result"]["types"]
+        .as_object()
+        .unwrap()
+        .clone();
+
+    let unknown: Vec<&str> = types
+        .values()
+        .filter_map(|t| t["qualifiedName"].as_str())
+        .filter(|q| q.contains("<unknown>"))
+        .collect();
+
+    assert!(
+        unknown.is_empty(),
+        "a name that cannot identify a class must be omitted, got {unknown:?}"
+    );
+}
+
+/// Fixture: `f` declared on `A` and on `C`, with `B` in between declaring nothing,
+/// so the class that declares what `super().f` resolves to is neither the pivot
+/// (`C`) nor the next class in the MRO (`B`).
+fn skipped_mro_level_project() -> tempfile::TempDir {
+    create_test_project(&[(
+        "mro.py",
+        "class A:\n\
+         \x20   def f(self) -> int:\n\
+         \x20       return 1\n\
+         \n\
+         class B(A):\n\
+         \x20   pass\n\
+         \n\
+         class C(B):\n\
+         \x20   def f(self) -> str:\n\
+         \x20       return \"c\"\n\
+         \n\
+         \x20   def go(self):\n\
+         \x20       self.f()\n\
+         \x20       super().f()\n\
+         \n\
+         \x20   def helper(self):\n\
+         \x20       def inner() -> None: ...\n\
+         \x20       return inner\n\
+         \n\
+         def top() -> None: ...\n",
+    )])
+}
+
+/// Returns the descriptor of the one node of `node_kind` spanning exactly `text`.
+fn descriptor_at(
+    nodes: &[serde_json::Value],
+    types: &TypeMap,
+    source: &str,
+    node_kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    let type_id = node_at(nodes, source, node_kind, text)["typeId"]
+        .as_u64()
+        .expect("node should be typed");
+    types[&type_id.to_string()].clone()
+}
+
+fn mro_fixture_response() -> (tempfile::TempDir, String, Vec<serde_json::Value>, TypeMap) {
+    let dir = skipped_mro_level_project();
+    let source = std::fs::read_to_string(dir.path().join("mro.py")).unwrap();
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("mro.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    (dir, source, nodes, types)
+}
+
+#[test]
+fn test_a_method_names_the_class_that_declares_it() {
+    let (_dir, source, nodes, types) = mro_fixture_response();
+
+    let qualified_name_of = |descriptor: &serde_json::Value| {
+        let class_id = descriptor["declaringClassId"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("expected a declaringClassId, got {descriptor}"));
+        types[&class_id.to_string()]["qualifiedName"].clone()
+    };
+
+    let over_super = descriptor_at(&nodes, &types, &source, "ExprAttribute", "super().f");
+    assert_eq!(qualified_name_of(&over_super), "mro.A");
+
+    let over_self = descriptor_at(&nodes, &types, &source, "ExprAttribute", "self.f");
+    assert_eq!(qualified_name_of(&over_self), "mro.C");
+}
+
+#[test]
+fn test_a_super_receiver_reports_its_pivot_class_and_receiver() {
+    let (_dir, source, nodes, types) = mro_fixture_response();
+
+    let receiver = descriptor_at(&nodes, &types, &source, "ExprCall", "super()");
+    assert_eq!(receiver["kind"], "super");
+
+    let pivot = &types[&receiver["pivotClassId"].as_u64().unwrap().to_string()];
+    assert_eq!(pivot["qualifiedName"], "mro.C");
+
+    // Implicitly `self` inside a method body.
+    let bound_to = &types[&receiver["receiverId"].as_u64().unwrap().to_string()];
+    assert_eq!(bound_to["kind"], "typeVar");
+    assert_eq!(bound_to["name"], "Self");
+}
+
+#[test]
+fn test_a_function_outside_a_class_body_names_no_declaring_class() {
+    let (_dir, _source, _nodes, types) = mro_fixture_response();
+
+    let function_named = |name: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "function" && t["name"] == name)
+            .unwrap_or_else(|| panic!("expected a function descriptor for {name}"))
+    };
+
+    assert!(function_named("top")["declaringClassId"].is_null());
+    // A method body encloses `inner`, but does not declare it.
+    assert!(function_named("inner")["declaringClassId"].is_null());
+}
+
+/// The `(nodeKind, source text, typeId)` of every node lying within `range`, in the
+/// order the walk emitted them.
+fn nodes_within(
+    nodes: &[serde_json::Value],
+    source: &str,
+    range: std::ops::Range<usize>,
+) -> Vec<(String, String, Option<u64>)> {
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let start = n["start"].as_u64().unwrap() as usize;
+            let end = n["end"].as_u64().unwrap() as usize;
+            (range.start <= start && end <= range.end).then(|| {
+                (
+                    n["nodeKind"].as_str().unwrap().to_string(),
+                    source[start..end].to_string(),
+                    n["typeId"].as_u64(),
+                )
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_quoted_annotation_body_yields_the_nodes_of_the_unquoted_form() {
+    let source = concat!(
+        "from typing import Dict, List\n",
+        "quoted: \"Dict[str, List[int]]\" = {}\n",
+        "plain: Dict[str, List[int]] = {}\n",
+    );
+    let dir = create_test_project(&[("q.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("q.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let annotation = "Dict[str, List[int]]";
+    let quoted = source.find(annotation).unwrap();
+    let plain = source.rfind(annotation).unwrap();
+    let in_quotes = nodes_within(&nodes, source, quoted..quoted + annotation.len());
+
+    let shape: Vec<(&str, &str)> = in_quotes
+        .iter()
+        .map(|(kind, text, _)| (kind.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("ExprSubscript", "Dict[str, List[int]]"),
+            ("ExprName", "Dict"),
+            ("ExprTuple", "str, List[int]"),
+            ("ExprName", "str"),
+            ("ExprSubscript", "List[int]"),
+            ("ExprName", "List"),
+            ("ExprName", "int"),
+        ],
+        "the body's head, its arguments and its nested subscript each need a node"
+    );
+    assert_eq!(
+        in_quotes,
+        nodes_within(&nodes, source, plain..plain + annotation.len()),
+        "quoting an annotation must not change the types its parts resolve to"
+    );
+
+    let string_node = node_at(
+        &nodes,
+        source,
+        "ExprStringLiteral",
+        &format!("\"{annotation}\""),
+    );
+    assert_eq!(
+        string_node["typeId"].as_u64(),
+        in_quotes[0].2,
+        "the string keeps a node of its own, carrying the type its body resolves to"
+    );
+}
+
+#[test]
+fn test_a_string_that_is_not_a_forward_reference_stays_a_leaf() {
+    let source = concat!(
+        "from typing import Literal\n",
+        "raw: r\"int\" = 0\n",
+        "escaped: \"in\\x74\" = 0\n",
+        "concatenated: \"in\" \"t\" = 0\n",
+        "malformed: \"int[\" = 0\n",
+        "value: Literal[\"int\"] = \"int\"\n",
+    );
+    let dir = create_test_project(&[("s.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("s.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let strings: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprStringLiteral")
+        .collect();
+    assert_eq!(strings.len(), 6, "fixture should hold six string literals");
+
+    for string in strings {
+        let start = string["start"].as_u64().unwrap() as usize;
+        let end = string["end"].as_u64().unwrap() as usize;
+        let inside: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| {
+                let node =
+                    n["start"].as_u64().unwrap() as usize..n["end"].as_u64().unwrap() as usize;
+                (start <= node.start && node.end <= end && (node.start, node.end) != (start, end))
+                    .then(|| &source[node])
+            })
+            .collect();
+        assert!(
+            inside.is_empty(),
+            "{} is not a forward reference, so nothing should be emitted inside it: {inside:?}",
+            &source[start..end]
+        );
+    }
+}
+
+#[test]
+fn test_a_quote_nested_in_a_quoted_annotation_descends_too() {
+    let source = concat!(
+        "class Later: pass\n",
+        "nested: \"dict[str, 'Later']\" = {}\n",
+        "plain: Later = Later()\n",
+    );
+    let dir = create_test_project(&[("n.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("n.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let inner = source.find("'Later'").unwrap() + 1;
+    let in_inner_quotes = nodes_within(&nodes, source, inner..inner + "Later".len());
+
+    let shape: Vec<(&str, &str)> = in_inner_quotes
+        .iter()
+        .map(|(kind, text, _)| (kind.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![("ExprName", "Later")],
+        "a quote inside a quoted annotation needs descending into as well"
+    );
+    let plain = source.rfind("Later = Later()").unwrap();
+    assert_eq!(
+        in_inner_quotes,
+        nodes_within(&nodes, source, plain..plain + "Later".len()),
+        "a forward reference resolves to the class the unquoted annotation names"
+    );
+}
+
+#[test]
+fn test_a_call_in_a_quoted_annotation_binds_as_it_does_unquoted() {
+    let source = concat!(
+        "from typing import Annotated\n",
+        "def meta(n: int) -> str: ...\n",
+        "quoted: \"Annotated[int, meta(1)]\" = 0\n",
+        "plain: Annotated[int, meta(1)] = 0\n",
+    );
+    let dir = create_test_project(&[("c.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("c.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let calls: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprCall")
+        .collect();
+    assert_eq!(calls.len(), 2, "each annotation holds one call");
+    assert!(
+        !calls[0]["callSignature"].is_null(),
+        "the quoted annotation's call needs a signature"
+    );
+    assert_eq!(
+        calls[0]["callSignature"], calls[1]["callSignature"],
+        "a call reached through the sub-model binds as one in the file's own AST does"
     );
 }

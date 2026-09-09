@@ -1,7 +1,10 @@
 use ruff_db::system::SystemPathBuf;
 use rustc_hash::FxHashMap;
 use ty_module_resolver::ResolverFile;
+use ty_python_core::semantic_index;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
+use ty_python_semantic::types::function::FunctionType;
+use ty_python_semantic::types::infer::original_class_type;
 use ty_python_semantic::types::list_members;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind, Signature};
 use ty_python_semantic::types::tuple::{Tuple, VariableSegment};
@@ -32,7 +35,7 @@ pub struct TypeRegistry<'db> {
     type_to_id: FxHashMap<Type<'db>, TypeId>,
     descriptors: FxHashMap<TypeId, TypeDescriptor>,
     next_id: TypeId,
-    /// Tracks all type IDs registered since the last `start_tracking()` call,
+    /// Tracks all type IDs registered since the last `drain_new_types()`,
     /// including component types registered transitively by `build_descriptor`.
     tracked_new_ids: Vec<TypeId>,
     /// When set, class literals whose definition file is not local to the boundary
@@ -46,6 +49,13 @@ pub struct TypeRegistry<'db> {
 pub struct RegistrationResult {
     pub type_id: TypeId,
     pub is_new: bool,
+}
+
+/// A qualified name that cannot identify the class it names is worse than none:
+/// ty spells a class built from a runtime name `<unknown>`, so two of them in one
+/// scope render identically and a client keying by this field merges them.
+fn identifying(qualified_name: String) -> Option<String> {
+    (!qualified_name.contains("<unknown>")).then_some(qualified_name)
 }
 
 impl<'db> TypeRegistry<'db> {
@@ -116,9 +126,16 @@ impl<'db> TypeRegistry<'db> {
         self.next_id += 1;
         self.type_to_id.insert(ty, id);
 
+        // `build_descriptor` registers component types, so a self-referential type only
+        // terminates if the id is interned first. It also runs ty queries that can panic,
+        // which `catch_collect` turns into one failed file — seeding the descriptor and
+        // the pending id keeps every id the client receives resolvable.
+        self.descriptors
+            .insert(id, TypeDescriptor::Other { display: None });
+        self.tracked_new_ids.push(id);
+
         let descriptor = self.build_descriptor(ty, db);
         self.descriptors.insert(id, descriptor);
-        self.tracked_new_ids.push(id);
 
         RegistrationResult {
             type_id: id,
@@ -139,13 +156,10 @@ impl<'db> TypeRegistry<'db> {
             .collect()
     }
 
-    /// Begin tracking newly registered types (including transitive components).
-    pub fn start_tracking(&mut self) {
-        self.tracked_new_ids.clear();
-    }
-
-    /// Drain all type IDs registered since the last `start_tracking()` call
-    /// and return their descriptors.
+    /// Drain all type IDs registered since the previous drain and return their
+    /// descriptors. Draining is the only thing that clears the pending set, so types
+    /// registered by a request that failed part-way reach the client with the next
+    /// successful one.
     pub fn drain_new_types(&mut self) -> std::collections::HashMap<TypeId, TypeDescriptor> {
         self.tracked_new_ids
             .drain(..)
@@ -162,6 +176,17 @@ impl<'db> TypeRegistry<'db> {
     fn resolve_module_name(&self, db: &'db dyn Db, file: ruff_db::files::File) -> Option<String> {
         let resolver_file = ResolverFile::new(db, file, self.env.resolver_environment(db));
         ty_module_resolver::file_to_module(db, resolver_file).map(|m| m.name(db).to_string())
+    }
+
+    /// The class whose body declares `func`, or `None` when `func` is not a method.
+    fn declaring_class_id(&mut self, func: FunctionType<'db>, db: &'db dyn Db) -> Option<TypeId> {
+        // Reached through `body_scope`: `FunctionType::definition` would add a
+        // dependency on the full AST of the defining module.
+        let body_scope = func.first_overload_or_implementation(db).body_scope(db);
+        let index = semantic_index(db, body_scope.program_file(db));
+        let class = index.class_definition_of_method(body_scope.file_scope_id(db))?;
+        let class_literal = original_class_type(db, class)?;
+        Some(self.register_component(Type::ClassLiteral(class_literal), db))
     }
 
     fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
@@ -242,7 +267,7 @@ impl<'db> TypeRegistry<'db> {
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
                 let default_type_id = param
-                    .default_type()
+                    .default_type(db)
                     .map(|dt| self.register_component(dt, db));
                 let is_variadic = param.is_variadic() || param.is_keyword_variadic();
                 let concatenate_prefix = in_concatenate && !is_variadic;
@@ -414,7 +439,7 @@ impl<'db> TypeRegistry<'db> {
                         TypeDescriptor::EnumLiteral {
                             display,
                             class_name: enum_class.name(db).to_string(),
-                            qualified_name: Some(enum_class.qualified_name(db).to_string()),
+                            qualified_name: identifying(enum_class.qualified_name(db).to_string()),
                             member_name: e.name(db).to_string(),
                         }
                     }
@@ -460,8 +485,8 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let cl = instance.class_literal(db, &env);
                 let class_name = cl.name(db).to_string();
-                let module_name = instance.class_module_name(db, &env).map(|m| m.to_string());
-                let qualified_name = Some(cl.qualified_name(db).to_string());
+                let module_name = self.resolve_module_name(db, cl.file(db));
+                let qualified_name = identifying(cl.qualified_name(db).to_string());
 
                 let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -500,8 +525,8 @@ impl<'db> TypeRegistry<'db> {
                 if let Some(nominal) = instance.nominal_origin_instance(db) {
                     let cl = nominal.class_literal(db, &env);
                     let class_name = cl.name(db).to_string();
-                    let module_name = nominal.class_module_name(db, &env).map(|m| m.to_string());
-                    let qualified_name = Some(cl.qualified_name(db).to_string());
+                    let module_name = self.resolve_module_name(db, cl.file(db));
+                    let qualified_name = identifying(cl.qualified_name(db).to_string());
 
                     let supertypes = self.supertypes_from_class_literal(cl, db);
 
@@ -554,7 +579,7 @@ impl<'db> TypeRegistry<'db> {
                     let display = self.display_string(ty, db);
                     let class_name = class_literal.name(db).to_string();
                     let module_name = self.resolve_module_name(db, cl_file);
-                    let qualified_name = Some(class_literal.qualified_name(db).to_string());
+                    let qualified_name = identifying(class_literal.qualified_name(db).to_string());
                     return TypeDescriptor::ClassRef {
                         display,
                         class_name,
@@ -565,7 +590,7 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let class_name = class_literal.name(db).to_string();
                 let module_name = self.resolve_module_name(db, class_literal.file(db));
-                let qualified_name = Some(class_literal.qualified_name(db).to_string());
+                let qualified_name = identifying(class_literal.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(class_literal.generic_context(db), db);
                 let supertypes = self.supertypes_from_class_literal(class_literal, db);
@@ -606,7 +631,7 @@ impl<'db> TypeRegistry<'db> {
                     let class_name = origin.name(db).to_string();
                     let module_name = self.resolve_module_name(db, origin_file);
                     let qualified_name =
-                        Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
+                        identifying(ClassLiteral::Static(origin).qualified_name(db).to_string());
                     return TypeDescriptor::ClassRef {
                         display,
                         class_name,
@@ -618,7 +643,7 @@ impl<'db> TypeRegistry<'db> {
                 let class_name = origin.name(db).to_string();
                 let module_name = self.resolve_module_name(db, origin_file);
                 let qualified_name =
-                    Some(ClassLiteral::Static(origin).qualified_name(db).to_string());
+                    identifying(ClassLiteral::Static(origin).qualified_name(db).to_string());
                 let supertypes: Vec<TypeId> = origin
                     .explicit_bases(db)
                     .iter()
@@ -685,11 +710,13 @@ impl<'db> TypeRegistry<'db> {
                 let display = self.display_string(ty, db);
                 let name = func.name(db).to_string();
                 let module_name = self.resolve_module_name(db, func.file(db));
+                let declaring_class_id = self.declaring_class_id(func, db);
                 let (type_parameters, parameters, return_type) = self.build_function_params(ty, db);
                 TypeDescriptor::Function {
                     display,
                     name,
                     module_name,
+                    declaring_class_id,
                     type_parameters,
                     parameters,
                     return_type,
@@ -732,6 +759,7 @@ impl<'db> TypeRegistry<'db> {
                     _ => None,
                 };
                 let module_name = self.resolve_module_name(db, func.file(db));
+                let declaring_class_id = self.declaring_class_id(func, db);
                 let (type_parameters, parameters, return_type) =
                     self.build_function_params(func_ty, db);
                 TypeDescriptor::BoundMethod {
@@ -739,6 +767,7 @@ impl<'db> TypeRegistry<'db> {
                     name,
                     class_name,
                     module_name,
+                    declaring_class_id,
                     type_parameters,
                     parameters,
                     return_type,
@@ -758,6 +787,7 @@ impl<'db> TypeRegistry<'db> {
                     name: None,
                     class_name,
                     module_name: None,
+                    declaring_class_id: None,
                     type_parameters,
                     parameters,
                     return_type,
@@ -823,7 +853,7 @@ impl<'db> TypeRegistry<'db> {
                 } else {
                     Some(self.register_component(value_ty, db))
                 };
-                let qualified_name = Some(type_alias.qualified_name(db).to_string());
+                let qualified_name = identifying(type_alias.qualified_name(db).to_string());
                 let type_parameters =
                     self.build_type_parameters(type_alias.generic_context(db), db);
                 TypeDescriptor::TypeAlias {
@@ -841,7 +871,8 @@ impl<'db> TypeRegistry<'db> {
                 let name = defining_class
                     .map(|c| c.name(db).to_string())
                     .unwrap_or_default();
-                let qualified_name = defining_class.map(|c| c.qualified_name(db).to_string());
+                let qualified_name =
+                    defining_class.and_then(|c| identifying(c.qualified_name(db).to_string()));
                 let schema = typed_dict.items(db);
                 let fields: Vec<TypedDictFieldInfo> = schema
                     .iter()
@@ -996,7 +1027,7 @@ impl<'db> TypeRegistry<'db> {
                 let enum_class = complement.enum_class(db);
                 let class_name = enum_class.name(db).to_string();
                 let module_name = self.resolve_module_name(db, enum_class.file(db));
-                let qualified_name = Some(enum_class.qualified_name(db).to_string());
+                let qualified_name = identifying(enum_class.qualified_name(db).to_string());
                 let class_id = self.register_component(Type::ClassLiteral(enum_class), db);
                 let excluded_names = complement
                     .excluded_names(db)
@@ -1019,9 +1050,21 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
+            Type::BoundSuper(bound_super) => {
+                let display = self.display_string(ty, db);
+                let pivot_class_id =
+                    self.register_component(Type::from(bound_super.pivot_class(db)), db);
+                let receiver_id = self.register_component(bound_super.owner(db).owner_type(), db);
+                TypeDescriptor::Super {
+                    display,
+                    pivot_class_id,
+                    receiver_id,
+                }
+            }
+
             Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
-            | Type::BoundSuper(_)
+            | Type::SlotDescriptor(_)
             | Type::Divergent(_) => {
                 let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }

@@ -7,6 +7,7 @@ mod protocol;
 mod registry;
 
 use std::io::{self, BufRead, Write};
+use std::panic::AssertUnwindSafe;
 use std::process;
 
 use protocol::{
@@ -24,6 +25,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut serve = false;
+    let mut bindings = false;
     let mut project_root: Option<String> = None;
     let mut file_paths: Vec<String> = Vec::new();
 
@@ -31,6 +33,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--serve" => serve = true,
+            "--bindings" => bindings = true,
             "--project-root" => {
                 i += 1;
                 if i >= args.len() {
@@ -56,10 +59,18 @@ fn main() {
         process::exit(1);
     }
 
+    if serve && bindings {
+        eprintln!(
+            "Error: --bindings applies to one-shot mode; \
+             pass includeBindings on each getTypes request instead"
+        );
+        process::exit(1);
+    }
+
     if serve {
         run_serve();
     } else if !file_paths.is_empty() {
-        run_oneshot(&file_paths, project_root.as_deref());
+        run_oneshot(&file_paths, project_root.as_deref(), bindings);
     } else {
         print_usage();
         process::exit(1);
@@ -76,10 +87,11 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --project-root DIR   Override project root (defaults to first FILE's parent)");
+    eprintln!("  --bindings           Report where each referenced symbol is bound");
 }
 
 /// One-shot mode: infer types for one or more files and print JSON to stdout.
-fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
+fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: bool) {
     let first_absolute = std::fs::canonicalize(&file_args[0]).unwrap_or_else(|e| {
         eprintln!("Error: cannot resolve '{}': {e}", file_args[0]);
         process::exit(1);
@@ -108,6 +120,7 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
     let program = db.project().program(&db);
     let mut registry = TypeRegistry::new(program);
     let mut files = std::collections::HashMap::new();
+    let mut skipped = 0usize;
 
     for file_arg in file_args {
         let absolute = std::fs::canonicalize(file_arg).unwrap_or_else(|e| {
@@ -126,9 +139,19 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
                 process::exit(1);
             });
 
-        let result =
-            collector::collect_types(&db, ProgramFile::new(&db, file, program), &mut registry);
-        files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+        let program_file = ProgramFile::new(&db, file, program);
+        let registry = &mut registry;
+        let collect =
+            AssertUnwindSafe(|| collector::collect_types(&db, program_file, registry, bindings));
+        match collector::catch_collect(sys_path.as_str(), collect) {
+            Ok(result) => {
+                files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+            }
+            Err(message) => {
+                eprintln!("warning: {message}");
+                skipped += 1;
+            }
+        }
     }
 
     let output = CliResult {
@@ -141,6 +164,13 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>) {
         process::exit(1);
     });
     println!();
+
+    // The JSON is complete for the files that did resolve, so it is written either
+    // way; the status is what tells a caller the run was partial.
+    if skipped > 0 {
+        eprintln!("Error: {skipped} file(s) could not be analyzed");
+        process::exit(1);
+    }
 }
 
 /// JSON-RPC server mode over stdin/stdout.
@@ -406,7 +436,15 @@ fn handle_get_types<'db>(
     };
 
     let program_file = ProgramFile::new(db, file, db.project().program(db));
-    let result = collector::collect_types(db, program_file, registry);
+    let include_bindings = params.include_bindings;
+    let collect =
+        AssertUnwindSafe(|| collector::collect_types(db, program_file, registry, include_bindings));
+    let result = match collector::catch_collect(file_path.as_str(), collect) {
+        Ok(result) => result,
+        Err(message) => {
+            return JsonRpcResponse::error(request.id.clone(), -32001, message);
+        }
+    };
 
     let mut types = result.new_types;
     if !params.include_display {

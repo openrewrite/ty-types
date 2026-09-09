@@ -4,7 +4,7 @@ A Rust CLI that exposes [ty](https://github.com/astral-sh/ty)'s Python type infe
 
 ## Building
 
-Requires Rust 1.95+. The `ruff/` submodule must be checked out first:
+Requires Rust 1.96+. The `ruff/` submodule must be checked out first:
 
 ```bash
 git submodule update --init
@@ -23,7 +23,9 @@ Pass one or more Python files as arguments. The output is a single JSON object w
 ty-types app.py utils.py --project-root /path/to/project
 ```
 
-If `--project-root` is omitted, it defaults to the parent directory of the first file.
+If `--project-root` is omitted, it defaults to the parent directory of the first file. Pass `--bindings` to attach a [`BindingInfo`](#bindinginfo) to each name and attribute reference.
+
+A file whose inference panics is reported on stderr and omitted from `files`; the remaining files are still analyzed, and the exit status is non-zero. The JSON on stdout is complete for the files that did resolve, so a caller reads the status to tell a partial run from a complete one.
 
 **Output format:**
 
@@ -90,6 +92,7 @@ Infers types for a Python file and returns the typed AST nodes plus any new type
 |---|---|---|---|
 | `params.file` | `string` | | File path (absolute or relative to project root) |
 | `params.includeDisplay` | `boolean` | `true` | Include human-readable `display` strings on type descriptors |
+| `params.includeBindings` | `boolean` | `false` | Include a `binding` on each name and attribute reference. Costs roughly 10% inference time and 17% payload |
 
 Returns:
 
@@ -99,6 +102,8 @@ Returns:
   "types": { "<TypeId>": <TypeDescriptor>, ... }
 }
 ```
+
+ty's inference panics on some inputs (e.g. [astral-sh/ty#4454](https://github.com/astral-sh/ty/issues/4454)). Such a file answers with a JSON-RPC error of code `-32001` naming the file and the panic, and the session stays usable — later requests are unaffected, and types already registered reach the client with the next successful response.
 
 ### `getTypeRegistry`
 
@@ -139,8 +144,46 @@ Each entry in the `nodes` array represents a typed AST node:
 | `nodeKind` | `string` | AST node kind (see below) |
 | `typeId` | `integer \| null` | Reference into the type registry |
 | `callSignature` | `CallSignatureInfo \| null` | Present only on `ExprCall` nodes |
+| `binding` | `BindingInfo` | On `ExprName` and `ExprAttribute` nodes under `includeBindings`, where the reference resolves *(omitted otherwise)* |
 
 **Node kinds:** `StmtFunctionDef`, `StmtClassDef`, `StmtAssign`, `StmtFor`, `StmtWith`, `ExprCall`, `ExprBoolOp`, `ExprBinOp`, `ExprUnaryOp`, `ExprLambda`, `ExprIf`, `ExprDict`, `ExprSet`, `ExprListComp`, `ExprSetComp`, `ExprDictComp`, `ExprGenerator`, `ExprAwait`, `ExprYield`, `ExprYieldFrom`, `ExprCompare`, `ExprFString`, `ExprTString`, `ExprStringLiteral`, `ExprBytesLiteral`, `ExprNumberLiteral`, `ExprBooleanLiteral`, `ExprNoneLiteral`, `ExprEllipsisLiteral`, `ExprAttribute`, `ExprSubscript`, `ExprStarred`, `ExprName`, `ExprList`, `ExprTuple`, `ExprSlice`, `Parameter`, `ParameterWithDefault`, `Alias`
+
+**Quoted annotations:** a string annotation's body contributes its own nodes, at their byte offsets in the file, so `x: "list[int]"` attributes as `x: list[int]` does. The string has its own node and type, and the body's parts sit within it:
+
+```json
+[
+  { "start": 3, "end": 14, "nodeKind": "ExprStringLiteral", "typeId": 1 },
+  { "start": 4, "end": 13, "nodeKind": "ExprSubscript", "typeId": 1 },
+  { "start": 4, "end": 8, "nodeKind": "ExprName", "typeId": 2 },
+  { "start": 9, "end": 12, "nodeKind": "ExprName", "typeId": 3 }
+]
+```
+
+A quote nested in a quote descends too, so `"dict[str, 'Later']"` yields a node for `Later`. A string ty does not read as an annotation stays a single node: a value such as `Literal["a"]`, a raw prefix, an escape sequence, an implicit concatenation, or a syntax error.
+
+### BindingInfo
+
+Where a referenced symbol is bound, following re-export chains to the original binding. `pkg/__init__.py` re-exporting `LIMIT` from `pkg._impl` gives the same answer at every reference:
+
+```json
+{
+  "definedIn": "pkg._impl",
+  "qualifiedName": "pkg._impl.LIMIT"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `definedIn` | `string` | Module holding the binding |
+| `qualifiedName` | `string` | Dotted path through the enclosing scopes, e.g. `app.Holder.MAX`. `definedIn` says where the module part ends |
+
+A reference resolves when the binding is a function, class, type alias, or plain or annotated assignment. Parameters, loop and `with` and `except` targets, walrus and comprehension bindings, and attributes assigned in a method body all yield no `binding`. Scopes other than modules and classes appear in `qualifiedName` as ty spells them, so a function-local binding reads `app.<locals of function 'f'>.x`.
+
+`moduleName` on a type descriptor is the module of the *value's* type — `builtins` for `SEP: str = "/"`, and absent entirely for `LIMIT = 5`. Binding is a property of the reference, which is why it is reported here rather than on the type.
+
+`definedIn` names the module that binds the symbol, not the one it is conventionally imported from: `os.sep` reports `posixpath.sep`. This is the convention descriptors already use — `os.path.join` reports `moduleName: "posixpath"`.
+
+A symbol bound in more than one branch of a conditional import resolves to the branch whose type was inferred at the reference. Where the branches declare the same type, the choice among them is arbitrary.
 
 ### CallSignatureInfo
 
@@ -188,7 +231,7 @@ Every type in the registry is a tagged object with a `"kind"` discriminator. All
 
 Fields marked with *"omitted when empty"* are not present in the JSON when their value is empty or null.
 
-`qualifiedName`, wherever it appears below, is the dotted path of the enclosing modules and classes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`.
+`qualifiedName`, wherever it appears below, is the dotted path of the enclosing scopes followed by the item's own name (e.g. `a.b.C.D`). It is the field to key a class by: `moduleName` and `className` together cannot tell `a.b.C.D` apart from `a.b.D`. Scopes other than modules and classes appear as ty spells them, so a class defined inside a function reads `a.<locals of function 'f'>.C` — split it on `.` only if that spelling is accounted for. It is omitted where it would not identify the class: ty names a class built from a runtime name `<unknown>`, and two such classes in one scope render identically.
 
 #### `instance`
 
@@ -202,6 +245,9 @@ An object of a class (e.g. `int`, `str`, `MyClass()`).
 | `supertypes` | `integer[]` | Resolved base class type IDs *(omitted when empty)* |
 | `typeArgs` | `integer[]` | Specialization args, e.g. `list[int]` → `[<int>]` *(omitted when empty)* |
 | `classId` | `integer` | Type ID of the corresponding `classLiteral` *(omitted when empty)* |
+| `tupleElements` | `TupleElement[]` | Element types, on tuples and their subclasses *(omitted otherwise)* |
+
+Each `TupleElement` is `{"typeId": <integer>, "kind": <string>}`, where `kind` is `fixed` for a single element, `homogeneous` for the `...` segment of `tuple[int, ...]`, or `typeVarTuple` for the `*Ts` of `tuple[int, *Ts]`. The latter two each stand for an unknown number of elements.
 
 #### `classLiteral`
 
@@ -218,13 +264,72 @@ A class object itself (the value of `type[MyClass]`).
 
 `ClassMemberInfo`: `{ "name": string, "typeId": integer }`
 
+#### `classRef`
+
+A class defined outside the boundary of a `getLibraryApi` or `getStdlibApi` extraction — identity only, no members, supertypes or type parameters.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Class name |
+| `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified class name *(omitted when empty)* |
+
+`qualifiedName` is what rejoins a ref to the `classLiteral` carrying the same class's body.
+
 #### `subclassOf`
 
 A `type[C]` constraint (subclass relationship).
 
 | Field | Type | Description |
 |---|---|---|
-| `base` | `integer` | Type ID of the base `classLiteral` |
+| `base` | `integer` | Type ID of the base: a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` |
+
+#### `super`
+
+A bound `super` object: `super()` or `super(C, obj)`.
+
+| Field | Type | Description |
+|---|---|---|
+| `pivotClassId` | `integer` | Type ID of the class the attribute lookup starts *after* in the receiver's MRO — `C` for `super(C, obj)`, the enclosing class for a bare `super()` |
+| `receiverId` | `integer` | Type ID of `super()`'s second argument, implicit inside a method body (a `Self` `typeVar` there) |
+
+Neither field names the class that declares what a `super()` attribute resolves to, because that is a property of the attribute rather than of the receiver: with `f` declared on `A` and on `C`, `super().f` inside `class C(B)`, `class B(A)` resolves to `A.f`, past a pivot of `C` and a next-in-MRO of `B`. Read `declaringClassId` off the attribute's own `boundMethod` for that.
+
+`super(C)` without a second argument is an instance of `builtins.super` rather than a bound super object, and reports `instance`.
+
+#### `typeForm`
+
+A `TypeForm[T]` value wrapping a type expression (PEP 747).
+
+| Field | Type | Description |
+|---|---|---|
+| `typeArgument` | `integer` | Type ID of the wrapped type expression |
+
+#### `knownInstance`
+
+A well-known singleton instance ty tracks specially, such as `TypeVar`, `typing.Callable`, `functools.partial(...)` or `range(...)`.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Class name |
+| `knownInstanceKind` | `string` | Which known instance this is |
+| `isNonEmpty` | `boolean` | Whether the instance is known to be non-empty *(omitted when unknown)* |
+| `wrappedType` | `integer` | Type ID of the wrapped type, where the kind wraps one *(omitted otherwise)* |
+| `parameters` | `ParameterInfo[]` | Parameters, where the kind is callable *(omitted when empty)* |
+| `returnType` | `integer` | Return type ID, where the kind is callable *(omitted when empty)* |
+
+#### `enumComplement`
+
+An enum instance with one or more canonical members excluded, e.g. `Color & ~Literal[Color.RED]`.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Enum class name |
+| `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified enum class name *(omitted when empty)* |
+| `classId` | `integer` | Type ID of the enum's `classLiteral` |
+| `excludedNames` | `string[]` | Member names excluded from the enum |
+| `rest` | `integer[]` | Type IDs of the members that remain |
 
 #### `union`
 
@@ -251,6 +356,7 @@ A named function.
 |---|---|---|
 | `name` | `string` | Function name |
 | `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `declaringClassId` | `integer` | Type ID of the `classLiteral` whose body declares the function *(omitted for a function that is not a method)* |
 | `typeParameters` | `integer[]` | Generic type parameters *(omitted when empty)* |
 | `parameters` | `ParameterInfo[]` | Full signature |
 | `returnType` | `integer \| null` | Return type ID |
@@ -262,10 +368,14 @@ A method bound to an instance.
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string \| null` | Method name *(omitted when empty)* |
+| `className` | `string \| null` | The receiver's class, set when the receiver is a nominal or protocol instance *(a literal or `Self` receiver reports none, though `declaringClassId` still resolves: `"".join` names `builtins.str`)* |
 | `moduleName` | `string \| null` | Defining module *(omitted when empty)* |
+| `declaringClassId` | `integer` | Type ID of the `classLiteral` whose body declares the method *(omitted when there is no such class)* |
 | `typeParameters` | `integer[]` | Generic type parameters *(omitted when empty)* |
-| `parameters` | `ParameterInfo[]` | Full signature (without `self`) |
+| `parameters` | `ParameterInfo[]` | Full signature, `self` included |
 | `returnType` | `integer \| null` | Return type ID |
+
+`className` and `declaringClassId` answer different questions and disagree on an inherited method: `Child().greet()`, with `greet` declared on `Base`, reports `className: "Child"` and a `declaringClassId` naming `Base`. The declaring class is the one a method pattern matches.
 
 #### `callable`
 

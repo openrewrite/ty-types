@@ -1,20 +1,53 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::panic::UnwindSafe;
 
 use ruff_python_ast::{
     self as ast, visitor::source_order, visitor::source_order::SourceOrderVisitor,
 };
 use ruff_text_size::Ranged;
 use ty_python_core::ProgramFile;
+use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_semantic::types::call::CallArguments;
 use ty_python_semantic::types::call::bind::CheckTypesMode;
 use ty_python_semantic::types::constraints::ConstraintSetBuilder;
+use ty_python_semantic::types::definition_resolution::find_symbol_in_scope;
+use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::signatures::{ConcatenateTail, ParametersKind};
 use ty_python_semantic::types::{ParameterKind, ProgramEnvironment, Type, TypeContext};
-use ty_python_semantic::{Db, HasType, SemanticModel};
+use ty_python_semantic::types::{binding_type, inferred_declaration};
+use ty_python_semantic::{
+    Db, HasType, ImportAliasResolution, ResolvedDefinition, SemanticModel,
+    definitions_for_attribute, definitions_for_name,
+};
 
-use crate::protocol::{CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId};
+use crate::protocol::{
+    BindingInfo, CallSignatureInfo, NodeAttribution, ParameterInfo, TypeDescriptor, TypeId,
+};
 use crate::registry::TypeRegistry;
+
+/// Runs `f`, converting a panic inside ty's inference into an error message.
+///
+/// ty's inference panics on some inputs (e.g. astral-sh/ty#4454), and one such file
+/// must not cost a session the results it holds for every other file. Salsa
+/// cancellations keep unwinding: they signal that the revision is gone, so the
+/// result would be meaningless.
+pub fn catch_collect<R>(path: &str, f: impl FnOnce() -> R + UnwindSafe) -> Result<R, String> {
+    ruff_db::panic::catch_unwind(f).map_err(|error| {
+        match error.payload.downcast_ref::<salsa::Cancelled>() {
+            None | Some(salsa::Cancelled::PropagatedPanic) => {}
+            Some(_) => error.resume_unwind(),
+        }
+        error.to_diagnostic_message(Some(path))
+    })
+}
+
+fn only_definition<'db>(resolved: ResolvedDefinition<'db>) -> Option<Definition<'db>> {
+    match resolved {
+        ResolvedDefinition::Definition(definition) => Some(definition),
+        _ => None,
+    }
+}
 
 pub struct CollectionResult {
     pub nodes: Vec<NodeAttribution>,
@@ -25,10 +58,9 @@ pub fn collect_types<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
     registry: &mut TypeRegistry<'db>,
+    include_bindings: bool,
 ) -> CollectionResult {
     let ast = ruff_db::parsed::parsed_module(db, file.python_file(db)).load(db);
-
-    registry.start_tracking();
 
     let mut collector = TypeCollector {
         model: SemanticModel::new(db, file),
@@ -37,6 +69,7 @@ pub fn collect_types<'db>(
         env: ProgramEnvironment::from_program(file.program(db)),
         db,
         registry,
+        include_bindings,
         nodes: Vec::new(),
     };
 
@@ -55,6 +88,7 @@ struct TypeCollector<'db, 'reg> {
     env: ProgramEnvironment<'db>,
     db: &'db dyn Db,
     registry: &'reg mut TypeRegistry<'db>,
+    include_bindings: bool,
     nodes: Vec<NodeAttribution>,
 }
 
@@ -71,6 +105,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             node_kind: Cow::Borrowed(node_kind),
             type_id,
             call_signature: None,
+            binding: None,
         });
     }
 
@@ -86,7 +121,156 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             node_kind: Cow::Borrowed("ExprCall"),
             type_id,
             call_signature,
+            binding: None,
         });
+    }
+
+    fn record_expr_node(
+        &mut self,
+        node_kind: &'static str,
+        expr: &ast::Expr,
+        inferred: Option<Type<'db>>,
+        type_id: Option<TypeId>,
+    ) {
+        let binding = self
+            .include_bindings
+            .then(|| self.binding_info(expr, inferred))
+            .flatten();
+        self.nodes.push(NodeAttribution {
+            start: expr.range().start().into(),
+            end: expr.range().end().into(),
+            node_kind: Cow::Borrowed(node_kind),
+            type_id,
+            call_signature: None,
+            binding,
+        });
+    }
+
+    /// Resolves a reference to the definition that binds it, through re-export chains.
+    fn binding_info(&self, expr: &ast::Expr, inferred: Option<Type<'db>>) -> Option<BindingInfo> {
+        let db = self.db;
+        let candidates: Vec<Definition<'db>> = match expr {
+            ast::Expr::Name(name) => definitions_for_name(
+                &self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            ast::Expr::Attribute(attribute) => definitions_for_attribute(&self.model, attribute),
+            _ => return None,
+        }
+        .into_iter()
+        .filter_map(only_definition)
+        .collect();
+
+        // A symbol bound under `if sys.platform == ...` yields one definition per
+        // branch, in source order and unfiltered by reachability. The live branch is
+        // the one matching the type this file binds the symbol to, which every
+        // reference shares. A lone candidate is the answer already, whatever its type.
+        let matched = self
+            .bound_types_here(expr)
+            .unwrap_or_else(|| vec![inferred]);
+        let definition = match candidates.as_slice() {
+            [definition] => *definition,
+            _ => candidates
+                .iter()
+                .copied()
+                .find(|definition| {
+                    let types = self.reference_types_of(*definition);
+                    matched.iter().any(|ty| types.contains(ty))
+                })
+                .or_else(|| candidates.first().copied())?,
+        };
+
+        Some(BindingInfo {
+            defined_in: self.module_name_of(definition.file(db))?,
+            qualified_name: self.qualified_name_of(definition)?,
+        })
+    }
+
+    /// The types the name carries at its binding in the reference's own scope, which
+    /// narrowing at the reference cannot reach.
+    ///
+    /// `None` where that scope does not bind it — a builtin, or a name from an
+    /// enclosing scope.
+    fn bound_types_here(&self, expr: &ast::Expr) -> Option<Vec<Option<Type<'db>>>> {
+        let db = self.db;
+        let ast::Expr::Name(name) = expr else {
+            return None;
+        };
+        let scope = self
+            .model
+            .scope(name.into())?
+            .to_scope_id(db, self.model.program_file());
+        let local = find_symbol_in_scope(db, scope, name.id.as_str());
+
+        let types: Vec<Option<Type<'db>>> = local
+            .iter()
+            .flat_map(|definition| self.reference_types_of(*definition))
+            .collect();
+        (!types.is_empty()).then_some(types)
+    }
+
+    /// The types a reference to `definition` can carry: its declared type where it
+    /// declares one (`LEVEL: int = 7` reads as `int`), and its assigned type
+    /// otherwise (`LEVEL = 7` reads as `Literal[7]`).
+    ///
+    /// `binding_type` panics on a definition that declares without binding
+    /// (`x: int` with no value, outside a stub), hence the category gate.
+    fn reference_types_of(&self, definition: Definition<'db>) -> Vec<Option<Type<'db>>> {
+        let db = self.db;
+        let in_stub = definition.file(db).path(db).extension() == Some("pyi");
+        let module = ruff_db::parsed::parsed_module(db, definition.python_file(db)).load(db);
+        let category = definition.kind(db).category(in_stub, &module);
+
+        let mut types = Vec::with_capacity(2);
+        if category.is_declaration() {
+            types.push(
+                inferred_declaration(db, definition)
+                    .declared()
+                    .map(|declared| declared.inner_type()),
+            );
+        }
+        if category.is_binding() {
+            types.push(Some(binding_type(db, definition)));
+        }
+        types
+    }
+
+    fn qualified_name_of(&self, definition: Definition<'db>) -> Option<String> {
+        let db = self.db;
+        let mut components = qualified_name_components_from_scope(
+            db,
+            definition.program_file(db),
+            definition.file_scope(db),
+            0,
+        );
+        components.push(self.definition_name_of(definition)?);
+        Some(components.join("."))
+    }
+
+    /// `Definition::name` covers function, class, type-alias and plain assignment.
+    /// A typed module constant (`SEP: str = "/"`) is an annotated assignment, whose
+    /// name comes from its target expression.
+    fn definition_name_of(&self, definition: Definition<'db>) -> Option<String> {
+        let db = self.db;
+        definition.name(db).or_else(|| {
+            let module = ruff_db::parsed::parsed_module(db, definition.python_file(db)).load(db);
+            match definition.kind(db) {
+                DefinitionKind::AnnotatedAssignment(assignment) => assignment
+                    .target(&module)
+                    .as_name_expr()
+                    .map(|name| name.id.as_str().to_string()),
+                _ => None,
+            }
+        })
+    }
+
+    fn module_name_of(&self, file: ruff_db::files::File) -> Option<String> {
+        let db = self.db;
+        let resolver_file =
+            ty_module_resolver::ResolverFile::new(db, file, self.env.resolver_environment(db));
+        ty_module_resolver::file_to_module(db, resolver_file).map(|m| m.name(db).to_string())
     }
 
     fn register_type(&mut self, ty: ty_python_semantic::types::Type<'db>) -> TypeId {
@@ -131,7 +315,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         // Pick the first matching overload (fallback to first overload)
         let binding = bindings.iter_flat().flatten().next()?;
 
-        let specialization = binding.specialization(db);
+        let specialization = binding.merged_specialization(db);
 
         // Compute the specialized return type from the binding
         let return_type_id = Some(self.register_type(binding.return_type()));
@@ -171,7 +355,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
                     ParameterKind::KeywordVariadic { .. } => ("keywordVariadic", false),
                 };
 
-                let default_type_id = param.default_type().map(|dt| self.register_type(dt));
+                let default_type_id = param.default_type(db).map(|dt| self.register_type(dt));
 
                 let is_variadic = param.is_variadic() || param.is_keyword_variadic();
                 let concatenate_prefix = in_concatenate && !is_variadic;
@@ -211,6 +395,21 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
             return_type_id,
             type_arguments,
         })
+    }
+
+    /// Walks the body of a quoted annotation. The body is absent from the file's own
+    /// AST and resolves only against the sub-model ty hands back with it; its ranges are
+    /// absolute file offsets, like every other node's.
+    ///
+    /// ty returns nothing for a string it did not itself read as an annotation.
+    /// See README.md: NodeAttribution.
+    fn visit_string_annotation_body(&mut self, string: &ast::ExprStringLiteral) {
+        let Some((body, sub_model)) = self.model.enter_string_annotation(string) else {
+            return;
+        };
+        let enclosing = std::mem::replace(&mut self.model, sub_model);
+        self.visit_expr(body.expr());
+        self.model = enclosing;
     }
 
     fn visit_target(&mut self, target: &ast::Expr) {
@@ -288,13 +487,17 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
                 let call_sig = self.build_call_signature(call_expr);
                 self.record_call_node(expr.range(), Some(type_id), call_sig);
             } else {
-                self.record_node(node_kind, expr.range(), Some(type_id));
+                self.record_expr_node(node_kind, expr, Some(ty), Some(type_id));
             }
         } else if let ast::Expr::Call(call_expr) = expr {
             let call_sig = self.build_call_signature(call_expr);
             self.record_call_node(expr.range(), None, call_sig);
         } else {
-            self.record_node(node_kind, expr.range(), None);
+            self.record_expr_node(node_kind, expr, None, None);
+        }
+
+        if let ast::Expr::StringLiteral(string) = expr {
+            self.visit_string_annotation_body(string);
         }
 
         source_order::walk_expr(self, expr);
@@ -381,5 +584,40 @@ fn expr_kind_name(expr: &ast::Expr) -> &'static str {
         ast::Expr::Tuple(_) => "ExprTuple",
         ast::Expr::Slice(_) => "ExprSlice",
         ast::Expr::IpyEscapeCommand(_) => "ExprIpyEscapeCommand",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catch_collect;
+
+    #[test]
+    fn a_panic_becomes_an_error_naming_the_file_and_the_cause() {
+        let err = catch_collect("ssl.py", || panic!("assertion `left == right` failed"))
+            .expect_err("a panic must be reported, not unwind past the caller");
+
+        assert!(err.contains("ssl.py"), "should name the file: {err}");
+        assert!(
+            err.contains("assertion `left == right` failed"),
+            "should carry ty's panic payload: {err}"
+        );
+    }
+
+    #[test]
+    fn a_salsa_cancellation_keeps_unwinding() {
+        let escaped = std::panic::catch_unwind(|| {
+            let _: Result<(), _> = catch_collect("x.py", || {
+                std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite))
+            });
+        })
+        .expect_err("a cancellation must propagate past catch_collect");
+
+        assert!(
+            matches!(
+                escaped.downcast_ref::<salsa::Cancelled>(),
+                Some(salsa::Cancelled::PendingWrite)
+            ),
+            "the original cancellation must reach the caller unchanged"
+        );
     }
 }

@@ -2053,3 +2053,192 @@ fn test_a_function_outside_a_class_body_names_no_declaring_class() {
     // A method body encloses `inner`, but does not declare it.
     assert!(function_named("inner")["declaringClassId"].is_null());
 }
+
+/// The `(nodeKind, source text, typeId)` of every node lying within `range`, in the
+/// order the walk emitted them.
+fn nodes_within(
+    nodes: &[serde_json::Value],
+    source: &str,
+    range: std::ops::Range<usize>,
+) -> Vec<(String, String, Option<u64>)> {
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let start = n["start"].as_u64().unwrap() as usize;
+            let end = n["end"].as_u64().unwrap() as usize;
+            (range.start <= start && end <= range.end).then(|| {
+                (
+                    n["nodeKind"].as_str().unwrap().to_string(),
+                    source[start..end].to_string(),
+                    n["typeId"].as_u64(),
+                )
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_quoted_annotation_body_yields_the_nodes_of_the_unquoted_form() {
+    let source = concat!(
+        "from typing import Dict, List\n",
+        "quoted: \"Dict[str, List[int]]\" = {}\n",
+        "plain: Dict[str, List[int]] = {}\n",
+    );
+    let dir = create_test_project(&[("q.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("q.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let annotation = "Dict[str, List[int]]";
+    let quoted = source.find(annotation).unwrap();
+    let plain = source.rfind(annotation).unwrap();
+    let in_quotes = nodes_within(&nodes, source, quoted..quoted + annotation.len());
+
+    let shape: Vec<(&str, &str)> = in_quotes
+        .iter()
+        .map(|(kind, text, _)| (kind.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("ExprSubscript", "Dict[str, List[int]]"),
+            ("ExprName", "Dict"),
+            ("ExprTuple", "str, List[int]"),
+            ("ExprName", "str"),
+            ("ExprSubscript", "List[int]"),
+            ("ExprName", "List"),
+            ("ExprName", "int"),
+        ],
+        "the body's head, its arguments and its nested subscript each need a node"
+    );
+    assert_eq!(
+        in_quotes,
+        nodes_within(&nodes, source, plain..plain + annotation.len()),
+        "quoting an annotation must not change the types its parts resolve to"
+    );
+
+    let string_node = node_at(
+        &nodes,
+        source,
+        "ExprStringLiteral",
+        &format!("\"{annotation}\""),
+    );
+    assert_eq!(
+        string_node["typeId"].as_u64(),
+        in_quotes[0].2,
+        "the string keeps a node of its own, carrying the type its body resolves to"
+    );
+}
+
+#[test]
+fn test_a_string_that_is_not_a_forward_reference_stays_a_leaf() {
+    let source = concat!(
+        "from typing import Literal\n",
+        "raw: r\"int\" = 0\n",
+        "escaped: \"in\\x74\" = 0\n",
+        "concatenated: \"in\" \"t\" = 0\n",
+        "malformed: \"int[\" = 0\n",
+        "value: Literal[\"int\"] = \"int\"\n",
+    );
+    let dir = create_test_project(&[("s.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("s.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let strings: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprStringLiteral")
+        .collect();
+    assert_eq!(strings.len(), 6, "fixture should hold six string literals");
+
+    for string in strings {
+        let start = string["start"].as_u64().unwrap() as usize;
+        let end = string["end"].as_u64().unwrap() as usize;
+        let inside: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| {
+                let node =
+                    n["start"].as_u64().unwrap() as usize..n["end"].as_u64().unwrap() as usize;
+                (start <= node.start && node.end <= end && (node.start, node.end) != (start, end))
+                    .then(|| &source[node])
+            })
+            .collect();
+        assert!(
+            inside.is_empty(),
+            "{} is not a forward reference, so nothing should be emitted inside it: {inside:?}",
+            &source[start..end]
+        );
+    }
+}
+
+#[test]
+fn test_a_quote_nested_in_a_quoted_annotation_descends_too() {
+    let source = concat!(
+        "class Later: pass\n",
+        "nested: \"dict[str, 'Later']\" = {}\n",
+        "plain: Later = Later()\n",
+    );
+    let dir = create_test_project(&[("n.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("n.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let inner = source.find("'Later'").unwrap() + 1;
+    let in_inner_quotes = nodes_within(&nodes, source, inner..inner + "Later".len());
+
+    let shape: Vec<(&str, &str)> = in_inner_quotes
+        .iter()
+        .map(|(kind, text, _)| (kind.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![("ExprName", "Later")],
+        "a quote inside a quoted annotation needs descending into as well"
+    );
+    let plain = source.rfind("Later = Later()").unwrap();
+    assert_eq!(
+        in_inner_quotes,
+        nodes_within(&nodes, source, plain..plain + "Later".len()),
+        "a forward reference resolves to the class the unquoted annotation names"
+    );
+}
+
+#[test]
+fn test_a_call_in_a_quoted_annotation_binds_as_it_does_unquoted() {
+    let source = concat!(
+        "from typing import Annotated\n",
+        "def meta(n: int) -> str: ...\n",
+        "quoted: \"Annotated[int, meta(1)]\" = 0\n",
+        "plain: Annotated[int, meta(1)] = 0\n",
+    );
+    let dir = create_test_project(&[("c.py", source)]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("c.py", 2),
+        &shutdown_request(99),
+    ]);
+    let nodes = responses[1]["result"]["nodes"].as_array().unwrap().clone();
+
+    let calls: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n["nodeKind"] == "ExprCall")
+        .collect();
+    assert_eq!(calls.len(), 2, "each annotation holds one call");
+    assert!(
+        !calls[0]["callSignature"].is_null(),
+        "the quoted annotation's call needs a signature"
+    );
+    assert_eq!(
+        calls[0]["callSignature"], calls[1]["callSignature"],
+        "a call reached through the sub-model binds as one in the file's own AST does"
+    );
+}

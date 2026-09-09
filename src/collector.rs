@@ -397,6 +397,21 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         })
     }
 
+    /// Walks the body of a quoted annotation. The body is absent from the file's own
+    /// AST and resolves only against the sub-model ty hands back with it; its ranges are
+    /// absolute file offsets, like every other node's.
+    ///
+    /// ty returns nothing for a string it did not itself read as an annotation.
+    /// See README.md: NodeAttribution.
+    fn visit_string_annotation_body(&mut self, string: &ast::ExprStringLiteral) {
+        let Some((body, sub_model)) = self.model.enter_string_annotation(string) else {
+            return;
+        };
+        let enclosing = std::mem::replace(&mut self.model, sub_model);
+        self.visit_expr(body.expr());
+        self.model = enclosing;
+    }
+
     fn visit_target(&mut self, target: &ast::Expr) {
         match target {
             ast::Expr::List(ast::ExprList { elts, .. })
@@ -479,6 +494,10 @@ impl SourceOrderVisitor<'_> for TypeCollector<'_, '_> {
             self.record_call_node(expr.range(), None, call_sig);
         } else {
             self.record_expr_node(node_kind, expr, None, None);
+        }
+
+        if let ast::Expr::StringLiteral(string) = expr {
+            self.visit_string_annotation_body(string);
         }
 
         source_order::walk_expr(self, expr);

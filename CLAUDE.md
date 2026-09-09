@@ -31,7 +31,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 Always run the suite under `fast-test`. The `release` profile links with fat LTO
 over the whole ruff graph at `codegen-units = 1`, and `cargo test` pays that twice
 — once for the binary the integration tests spawn, once for the test binary — so a
-one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The 45
+one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The
 tests themselves take seconds either way. `fast-test`'s first build compiles ruff
 from scratch (~9 min, once per checkout).
 
@@ -75,7 +75,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 |------|-------------|------------|
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
-| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`) | `className`, `moduleName`, `qualifiedName` |
+| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`). Every field holding a class's type ID — `classId`, `base`, `pivotClassId` — reports this kind for such a class | `className`, `moduleName`, `qualifiedName` |
 | `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
 | `super` | Bound `super` object (`super()`, `super(C, obj)`). Neither field names the class declaring what an attribute on it resolves to — read `declaringClassId` off the attribute | `pivotClassId`, `receiverId` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |

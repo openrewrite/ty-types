@@ -276,6 +276,8 @@ A class defined outside the boundary of a `getLibraryApi` or `getStdlibApi` extr
 
 `qualifiedName` is what rejoins a ref to the `classLiteral` carrying the same class's body.
 
+Every field holding the type ID of a class reports `classRef` for a class outside the boundary, so `instance.classId`, `subclassOf.base` and `super.pivotClassId` each read as this kind rather than the `classLiteral` documented for them below.
+
 #### `subclassOf`
 
 A `type[C]` constraint (subclass relationship).

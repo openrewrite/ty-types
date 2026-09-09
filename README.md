@@ -148,6 +148,19 @@ Each entry in the `nodes` array represents a typed AST node:
 
 **Node kinds:** `StmtFunctionDef`, `StmtClassDef`, `StmtAssign`, `StmtFor`, `StmtWith`, `ExprCall`, `ExprBoolOp`, `ExprBinOp`, `ExprUnaryOp`, `ExprLambda`, `ExprIf`, `ExprDict`, `ExprSet`, `ExprListComp`, `ExprSetComp`, `ExprDictComp`, `ExprGenerator`, `ExprAwait`, `ExprYield`, `ExprYieldFrom`, `ExprCompare`, `ExprFString`, `ExprTString`, `ExprStringLiteral`, `ExprBytesLiteral`, `ExprNumberLiteral`, `ExprBooleanLiteral`, `ExprNoneLiteral`, `ExprEllipsisLiteral`, `ExprAttribute`, `ExprSubscript`, `ExprStarred`, `ExprName`, `ExprList`, `ExprTuple`, `ExprSlice`, `Parameter`, `ParameterWithDefault`, `Alias`
 
+**Quoted annotations:** a string annotation's body contributes its own nodes, at their byte offsets in the file, so `x: "list[int]"` attributes as `x: list[int]` does. The string has its own node and type, and the body's parts sit within it:
+
+```json
+[
+  { "start": 3, "end": 14, "nodeKind": "ExprStringLiteral", "typeId": 1 },
+  { "start": 4, "end": 13, "nodeKind": "ExprSubscript", "typeId": 1 },
+  { "start": 4, "end": 8, "nodeKind": "ExprName", "typeId": 2 },
+  { "start": 9, "end": 12, "nodeKind": "ExprName", "typeId": 3 }
+]
+```
+
+A quote nested in a quote descends too, so `"dict[str, 'Later']"` yields a node for `Later`. A string ty does not read as an annotation stays a single node: a value such as `Literal["a"]`, a raw prefix, an escape sequence, an implicit concatenation, or a syntax error.
+
 ### BindingInfo
 
 Where a referenced symbol is bound, following re-export chains to the original binding. `pkg/__init__.py` re-exporting `LIMIT` from `pkg._impl` gives the same answer at every reference:

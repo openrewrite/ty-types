@@ -31,7 +31,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","params":{"projectRoot":"/path/to/p
 Always run the suite under `fast-test`. The `release` profile links with fat LTO
 over the whole ruff graph at `codegen-units = 1`, and `cargo test` pays that twice
 — once for the binary the integration tests spawn, once for the test binary — so a
-one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The 45
+one-line edit to `src/` costs 9 minutes against `fast-test`'s 9 seconds. The
 tests themselves take seconds either way. `fast-test`'s first build compiles ruff
 from scratch (~9 min, once per checkout).
 
@@ -47,7 +47,13 @@ Reach for `--release` only to measure inference speed or ship a binary.
 
 JSON-RPC over stdin/stdout, one JSON object per line.
 
-Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
+Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getLibraryApi`, `getStdlibApi`, `shutdown`.
+
+`getLibraryApi` extracts the public API of one installed distribution. Its `roots` param lists the paths that distribution installs — mypy ships `mypy/` and `mypyc/`, pytest ships `_pytest/`, `pytest/` and a bare `py.py` — each a package directory or a single module file. The boundary spans their union, so a class defined in one root and referenced from another stays a full `classLiteral`; classes outside every root become `classRef`. `root` names a single root and is unioned with `roots`. Two visibility filters are on by default and each has an opt-out: `includePrivateModules` keeps modules with an underscore-prefixed path component, and `includeNonExportedSymbols` keeps module-level symbols that `__all__` omits (or, with no `__all__`, underscore-prefixed ones). A root named explicitly is always extracted, whatever its name. Each module lists every public top-level name once; where a name is both declared and bound (`x: int = 1`, `def`, `class`, `import`), the declared type wins.
+
+`getStdlibApi` extracts the standard library's public API for the project's configured Python version. Its `modules` param selects the local unit (top-level module names): classes in those modules are full `classLiteral`s, classes elsewhere become `classRef`. Omitting `modules` returns all stdlib modules fully expanded.
+
+`initialize` accepts an optional first-party boundary that the session's `getTypes` registry honors: `firstPartyRoot` (a package root path) or `firstPartyModules` (top-level module names; used when `firstPartyRoot` is absent). When set, `getTypes` emits classes defined outside the boundary as `classRef` instead of fully expanding them; with neither field, every class is fully expanded (default behavior). `firstPartyRoot` takes precedence if both are given.
 
 A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
 
@@ -69,6 +75,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 |------|-------------|------------|
 | `instance` | Instance of a class (`str`, `int`, `MyClass()`); `tupleElements` is present for tuples and their subclasses | `className`, `moduleName`, `qualifiedName`, `supertypes`, `typeArgs`, `classId`, `tupleElements` |
 | `classLiteral` | Class object itself (`type[MyClass]`) | `className`, `moduleName`, `qualifiedName`, `typeParameters`, `supertypes`, `members` |
+| `classRef` | Reference to a class defined outside the extracted library boundary (identity only; maps to the type-table `TAG_CLASS_REF`). Every field holding a class's type ID — `classId`, `base`, `pivotClassId` — reports this kind for such a class | `className`, `moduleName`, `qualifiedName` |
 | `subclassOf` | Subclass-of constraint. `base` is a `classLiteral` for a class or a protocol declared as one, an `instance` for a synthesized protocol, otherwise `dynamic` or `typeVar` | `base` |
 | `super` | Bound `super` object (`super()`, `super(C, obj)`). Neither field names the class declaring what an attribute on it resolves to — read `declaringClassId` off the attribute | `pivotClassId`, `receiverId` |
 | `typeForm` | `TypeForm[T]` value wrapping a type expression (PEP 747) | `typeArgument` |

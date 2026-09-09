@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod collector;
+mod library;
 mod project;
 mod protocol;
 mod registry;
@@ -10,10 +11,11 @@ use std::panic::AssertUnwindSafe;
 use std::process;
 
 use protocol::{
-    CliResult, GetTypeRegistryResult, GetTypesParams, GetTypesResult, InitializeParams,
-    InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    CliResult, GetLibraryApiParams, GetLibraryApiResult, GetStdlibApiParams, GetTypeRegistryResult,
+    GetTypesParams, GetTypesResult, InitializeParams, InitializeResult, JsonRpcRequest,
+    JsonRpcResponse,
 };
-use registry::TypeRegistry;
+use registry::{Boundary, TypeRegistry};
 use ruff_db::files::system_path_to_file;
 use ruff_db::system::{SystemPath, SystemPathBuf};
 use ty_project::{Db as _, ProjectDatabase};
@@ -197,8 +199,8 @@ fn run_serve() {
 
         match request.method.as_str() {
             "initialize" => {
-                let (db, root) = match do_initialize(&request) {
-                    Ok(pair) => {
+                let (db, root, boundary) = match do_initialize(&request) {
+                    Ok(parts) => {
                         write_response(
                             &stdout,
                             &JsonRpcResponse::success(
@@ -206,7 +208,7 @@ fn run_serve() {
                                 serde_json::to_value(InitializeResult { ok: true }).unwrap(),
                             ),
                         );
-                        pair
+                        parts
                     }
                     Err(response) => {
                         write_response(&stdout, &response);
@@ -215,7 +217,7 @@ fn run_serve() {
                 };
 
                 // Enter session loop with persistent registry
-                if run_session(&db, &root, &mut lines, &stdout) {
+                if run_session(&db, &root, boundary, &mut lines, &stdout) {
                     return; // shutdown requested
                 }
                 // If session ended without shutdown (e.g., re-initialize),
@@ -247,12 +249,19 @@ fn run_serve() {
 fn run_session(
     db: &ProjectDatabase,
     project_root: &SystemPathBuf,
+    boundary: Option<Boundary>,
     lines: &mut io::Lines<io::StdinLock<'_>>,
     stdout: &io::Stdout,
 ) -> bool {
     // The registry lives for the duration of this function,
-    // sharing the 'db lifetime with the database reference.
-    let mut registry = TypeRegistry::new(db.project().program(db));
+    // sharing the 'db lifetime with the database reference. When a first-party
+    // boundary was supplied at initialize, classes outside it come back as
+    // `classRef`; otherwise every class is fully expanded (default behavior).
+    let program = db.project().program(db);
+    let mut registry = match boundary {
+        Some(b) => TypeRegistry::with_boundary(program, b),
+        None => TypeRegistry::new(program),
+    };
 
     loop {
         let Some(line) = read_line(lines) else {
@@ -281,6 +290,14 @@ fn run_session(
             }
             "getTypeRegistry" => {
                 let response = handle_get_type_registry(&request, &registry);
+                write_response(stdout, &response);
+            }
+            "getLibraryApi" => {
+                let response = handle_get_library_api(&request, db);
+                write_response(stdout, &response);
+            }
+            "getStdlibApi" => {
+                let response = handle_get_stdlib_api(&request, db);
                 write_response(stdout, &response);
             }
             "shutdown" => {
@@ -335,21 +352,42 @@ fn write_response(stdout: &io::Stdout, response: &JsonRpcResponse) {
     let _ = out.flush();
 }
 
+/// Parse a path string into a `SystemPathBuf`, returning a JSON-RPC error
+/// response (tagged with `id`) if the path is not valid Unicode.
+fn parse_system_path(path: &str, id: &serde_json::Value) -> Result<SystemPathBuf, JsonRpcResponse> {
+    SystemPathBuf::from_path_buf(std::path::PathBuf::from(path)).map_err(|p| {
+        JsonRpcResponse::error(
+            id.clone(),
+            -32000,
+            format!("Non-Unicode path: {}", p.display()),
+        )
+    })
+}
+
 fn do_initialize(
     request: &JsonRpcRequest,
-) -> Result<(ProjectDatabase, SystemPathBuf), JsonRpcResponse> {
+) -> Result<(ProjectDatabase, SystemPathBuf, Option<Boundary>), JsonRpcResponse> {
     let params: InitializeParams = serde_json::from_value(request.params.clone()).map_err(|e| {
         JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"))
     })?;
 
-    let root = SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.project_root))
-        .map_err(|p| {
-            JsonRpcResponse::error(
-                request.id.clone(),
-                -32000,
-                format!("Non-Unicode path: {}", p.display()),
-            )
-        })?;
+    let root = parse_system_path(&params.project_root, &request.id)?;
+
+    // Optional first-party boundary for the session's getTypes registry.
+    // `firstPartyRoot` takes precedence; `firstPartyModules` is ignored when it
+    // is set. With neither, there is no boundary (classes are fully expanded).
+    let boundary = if let Some(first_party_root) = &params.first_party_root {
+        Some(Boundary::UnderRoots(vec![parse_system_path(
+            first_party_root,
+            &request.id,
+        )?]))
+    } else if !params.first_party_modules.is_empty() {
+        Some(Boundary::Modules(
+            params.first_party_modules.into_iter().collect(),
+        ))
+    } else {
+        None
+    };
 
     let db = project::create_database(&params.project_root).map_err(|e| {
         JsonRpcResponse::error(
@@ -359,7 +397,7 @@ fn do_initialize(
         )
     })?;
 
-    Ok((db, root))
+    Ok((db, root, boundary))
 }
 
 fn handle_get_types<'db>(
@@ -431,5 +469,101 @@ fn handle_get_type_registry(
         types: registry.all_descriptors(),
     };
 
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
+}
+
+fn handle_get_library_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> JsonRpcResponse {
+    let params: GetLibraryApiParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32602,
+                format!("Invalid params: {e}"),
+            );
+        }
+    };
+
+    let mut roots = Vec::new();
+    for root in params.root.iter().chain(params.roots.iter()) {
+        match parse_system_path(root, &request.id) {
+            Ok(p) => roots.push(p),
+            Err(resp) => return resp,
+        }
+    }
+    if roots.is_empty() {
+        return JsonRpcResponse::error(
+            request.id.clone(),
+            -32602,
+            "Invalid params: one of `root` or `roots` is required".to_string(),
+        );
+    }
+
+    let visibility = library::Visibility {
+        include_private_modules: params.include_private_modules,
+        include_non_exported_symbols: params.include_non_exported_symbols,
+    };
+
+    // Use a fresh, boundary-scoped registry per call (not the session registry):
+    // boundary state is request-scoped, and library extraction must not share or
+    // pollute the session's getTypes type IDs. Roots are used as supplied by the
+    // caller; the caller is expected to pass clean absolute paths.
+    let program = db.project().program(db);
+    let mut registry = TypeRegistry::with_boundary(program, Boundary::UnderRoots(roots.clone()));
+    let modules = match library::extract_library_api(db, program, &roots, visibility, &mut registry)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32000,
+                format!("Failed to extract library API: {e}"),
+            );
+        }
+    };
+
+    let mut types = registry.all_descriptors();
+    if !params.include_display {
+        for desc in types.values_mut() {
+            desc.strip_display();
+        }
+    }
+
+    let response = GetLibraryApiResult { modules, types };
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
+}
+
+fn handle_get_stdlib_api(request: &JsonRpcRequest, db: &ProjectDatabase) -> JsonRpcResponse {
+    let params: GetStdlibApiParams = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                request.id.clone(),
+                -32602,
+                format!("Invalid params: {e}"),
+            );
+        }
+    };
+
+    let requested: rustc_hash::FxHashSet<String> = params.modules.into_iter().collect();
+    // A subset request makes everything outside it a classRef; an empty request
+    // means all stdlib is local, so no boundary cut is needed (full expansion).
+    let program = db.project().program(db);
+    let mut registry = if requested.is_empty() {
+        TypeRegistry::new(program)
+    } else {
+        TypeRegistry::with_boundary_modules(program, requested.clone())
+    };
+
+    let modules = library::extract_stdlib_api(db, program, &requested, &mut registry);
+
+    let mut types = registry.all_descriptors();
+    if !params.include_display {
+        for desc in types.values_mut() {
+            desc.strip_display();
+        }
+    }
+
+    let response = GetLibraryApiResult { modules, types };
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
 }

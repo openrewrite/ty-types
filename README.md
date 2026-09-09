@@ -264,6 +264,20 @@ A class object itself (the value of `type[MyClass]`).
 
 `ClassMemberInfo`: `{ "name": string, "typeId": integer }`
 
+#### `classRef`
+
+A class defined outside the boundary of a `getLibraryApi` or `getStdlibApi` extraction — identity only, no members, supertypes or type parameters.
+
+| Field | Type | Description |
+|---|---|---|
+| `className` | `string` | Class name |
+| `moduleName` | `string` | Defining module *(omitted when empty)* |
+| `qualifiedName` | `string` | Fully qualified class name *(omitted when empty)* |
+
+`qualifiedName` is what rejoins a ref to the `classLiteral` carrying the same class's body.
+
+Every field holding the type ID of a class reports `classRef` for a class outside the boundary, so `instance.classId`, `subclassOf.base` and `super.pivotClassId` each read as this kind rather than the `classLiteral` documented for them below.
+
 #### `subclassOf`
 
 A `type[C]` constraint (subclass relationship).

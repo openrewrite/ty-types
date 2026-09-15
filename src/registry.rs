@@ -338,6 +338,7 @@ impl<'db> TypeRegistry<'db> {
             KnownInstanceType::FunctoolsPartial(_) => "FunctoolsPartial",
             KnownInstanceType::Range { .. } => "Range",
             KnownInstanceType::FunctoolsPartialCall(_) => "FunctoolsPartialCall",
+            KnownInstanceType::MethodWrapper(_) => "MethodWrapper",
         }
     }
 
@@ -661,9 +662,10 @@ impl<'db> TypeRegistry<'db> {
 
             Type::BoundMethod(bound) => {
                 let display = self.display_string(ty, db);
+                // A classmethod can bind a callable instance, which has no definition
+                // to take a name, a module or a declaring class from.
                 let func = bound.function(db);
-                let func_ty = Type::FunctionLiteral(func);
-                let name = Some(func.name(db).to_string());
+                let name = func.map(|f| f.name(db).to_string());
                 // Derive class name from the self_instance type
                 let class_name = match bound.self_instance(db) {
                     Type::NominalInstance(inst) => {
@@ -674,10 +676,10 @@ impl<'db> TypeRegistry<'db> {
                         .map(|n| n.class_literal(db, &env).name(db).to_string()),
                     _ => None,
                 };
-                let module_name = self.resolve_module_name(db, func.file(db));
-                let declaring_class_id = self.declaring_class_id(func, db);
+                let module_name = func.and_then(|f| self.resolve_module_name(db, f.file(db)));
+                let declaring_class_id = func.and_then(|f| self.declaring_class_id(f, db));
                 let (type_parameters, parameters, return_type) =
-                    self.build_function_params(func_ty, db);
+                    self.build_function_params(bound.func(db), db);
                 TypeDescriptor::BoundMethod {
                     display,
                     name,
@@ -894,8 +896,12 @@ impl<'db> TypeRegistry<'db> {
                     | KnownInstanceType::FunctoolsPartialCall(p) => Some(p),
                     _ => None,
                 };
-                let wrapped_type =
-                    partial.map(|p| self.register_component(p.wrapped(db).inner(db), db));
+                let wrapped_type = match ki {
+                    KnownInstanceType::MethodWrapper(w) => {
+                        Some(self.register_component(w.wrapped(db), db))
+                    }
+                    _ => partial.map(|p| self.register_component(p.wrapped(db).inner(db), db)),
+                };
                 let (parameters, return_type) = partial
                     .and_then(|p| p.partial(db).signatures(db).iter().next())
                     .map(|sig| {

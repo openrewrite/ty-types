@@ -365,6 +365,8 @@ A method bound to an instance.
 
 `className` and `declaringClassId` answer different questions and disagree on an inherited method: `Child().greet()`, with `greet` declared on `Base`, reports `className: "Child"` and a `declaringClassId` naming `Base`. The declaring class is the one a method pattern matches.
 
+A classmethod can bind a callable instance rather than a Python function. There is no definition behind such a method, so `name`, `moduleName`, `declaringClassId` and `parameters` are all absent and `display` is what identifies it.
+
 #### `callable`
 
 A generic callable with unknown signature.

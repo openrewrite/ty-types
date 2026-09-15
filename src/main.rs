@@ -14,10 +14,13 @@ use protocol::{
     InitializeResult, JsonRpcRequest, JsonRpcResponse,
 };
 use registry::TypeRegistry;
-use ruff_db::files::system_path_to_file;
+use ruff_db::Db as _;
+use ruff_db::files::{File, FileError, system_path_to_file};
 use ruff_db::system::{SystemPath, SystemPathBuf};
+use ty_module_resolver::ResolverFile;
 use ty_project::{Db as _, ProjectDatabase};
 use ty_python_core::ProgramFile;
+use ty_python_semantic::types::ProgramEnvironment;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -110,7 +113,7 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
             .into_owned(),
     };
 
-    let db = project::create_database(&root_str).unwrap_or_else(|e| {
+    let (db, _root) = project::create_database(&root_str).unwrap_or_else(|e| {
         eprintln!("Error: failed to initialize project: {e}");
         process::exit(1);
     });
@@ -121,21 +124,19 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
     let mut skipped = 0usize;
 
     for file_arg in file_args {
-        let absolute = std::fs::canonicalize(file_arg).unwrap_or_else(|e| {
-            eprintln!("Error: cannot resolve '{file_arg}': {e}");
-            process::exit(1);
-        });
-
-        let sys_path = SystemPathBuf::from_path_buf(absolute.clone()).unwrap_or_else(|p| {
-            eprintln!("Error: non-Unicode path: {}", p.display());
-            process::exit(1);
-        });
-
-        let file =
-            system_path_to_file(&db, SystemPath::new(sys_path.as_str())).unwrap_or_else(|e| {
-                eprintln!("Error: failed to resolve file '{file_arg}': {e}");
+        // Spelled as the search roots are, so the file matches the root it lives under.
+        let sys_path = db
+            .system()
+            .canonicalize_path(SystemPath::new(file_arg))
+            .unwrap_or_else(|e| {
+                eprintln!("Error: cannot resolve '{file_arg}': {e}");
                 process::exit(1);
             });
+
+        let file = system_path_to_file(&db, &sys_path).unwrap_or_else(|e| {
+            eprintln!("Error: failed to resolve file '{file_arg}': {e}");
+            process::exit(1);
+        });
 
         let program_file = ProgramFile::new(&db, file, program);
         let registry = &mut registry;
@@ -143,7 +144,7 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
             AssertUnwindSafe(|| collector::collect_types(&db, program_file, registry, bindings));
         match collector::catch_collect(sys_path.as_str(), collect) {
             Ok(result) => {
-                files.insert(absolute.to_string_lossy().into_owned(), result.nodes);
+                files.insert(sys_path.as_str().to_string(), result.nodes);
             }
             Err(message) => {
                 eprintln!("warning: {message}");
@@ -246,7 +247,7 @@ fn run_serve() {
 /// Returns true if shutdown was requested.
 fn run_session(
     db: &ProjectDatabase,
-    project_root: &SystemPathBuf,
+    project_root: &ProjectRoot,
     lines: &mut io::Lines<io::StdinLock<'_>>,
     stdout: &io::Stdout,
 ) -> bool {
@@ -335,23 +336,20 @@ fn write_response(stdout: &io::Stdout, response: &JsonRpcResponse) {
     let _ = out.flush();
 }
 
+/// The project root as the client spelled it, and as the module resolver sees it.
+struct ProjectRoot {
+    given: SystemPathBuf,
+    canonical: SystemPathBuf,
+}
+
 fn do_initialize(
     request: &JsonRpcRequest,
-) -> Result<(ProjectDatabase, SystemPathBuf), JsonRpcResponse> {
+) -> Result<(ProjectDatabase, ProjectRoot), JsonRpcResponse> {
     let params: InitializeParams = serde_json::from_value(request.params.clone()).map_err(|e| {
         JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"))
     })?;
 
-    let root = SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.project_root))
-        .map_err(|p| {
-            JsonRpcResponse::error(
-                request.id.clone(),
-                -32000,
-                format!("Non-Unicode path: {}", p.display()),
-            )
-        })?;
-
-    let db = project::create_database(&params.project_root).map_err(|e| {
+    let (db, canonical) = project::create_database(&params.project_root).map_err(|e| {
         JsonRpcResponse::error(
             request.id.clone(),
             -32000,
@@ -359,13 +357,42 @@ fn do_initialize(
         )
     })?;
 
-    Ok((db, root))
+    Ok((
+        db,
+        ProjectRoot {
+            given: SystemPathBuf::from(params.project_root.as_str()),
+            canonical,
+        },
+    ))
+}
+
+/// The file to infer types for, taking the spelling of `absolute` that the module
+/// resolver can name.
+///
+/// A file reached through a symlinked search root is matched by its resolved path, and
+/// a file the project reaches by a symlink out of every search root is matched by the
+/// path it was asked for.
+fn resolve_file(db: &ProjectDatabase, absolute: &SystemPath) -> Result<File, FileError> {
+    let resolved = system_path_to_file(db, project::canonical(db.system(), absolute));
+    match resolved {
+        Ok(file) if belongs_to_a_module(db, file) => Ok(file),
+        _ => match system_path_to_file(db, absolute) {
+            Ok(file) if belongs_to_a_module(db, file) => Ok(file),
+            _ => resolved,
+        },
+    }
+}
+
+fn belongs_to_a_module(db: &ProjectDatabase, file: File) -> bool {
+    let env = ProgramEnvironment::from_program(db.project().program(db));
+    let resolver_file = ResolverFile::new(db, file, env.resolver_environment(db));
+    ty_module_resolver::file_to_module(db, resolver_file).is_some()
 }
 
 fn handle_get_types<'db>(
     request: &JsonRpcRequest,
     db: &'db ProjectDatabase,
-    project_root: &SystemPathBuf,
+    project_root: &ProjectRoot,
     registry: &mut TypeRegistry<'db>,
 ) -> JsonRpcResponse {
     let params: GetTypesParams = match serde_json::from_value(request.params.clone()) {
@@ -379,14 +406,14 @@ fn handle_get_types<'db>(
         }
     };
 
-    let file_path = if std::path::Path::new(&params.file).is_absolute() {
-        SystemPathBuf::from_path_buf(std::path::PathBuf::from(&params.file))
-            .unwrap_or_else(|_| SystemPathBuf::from(params.file.as_str()))
-    } else {
-        project_root.join(&params.file)
+    let requested = SystemPath::new(&params.file);
+    let absolute = match requested.strip_prefix(&project_root.given) {
+        Ok(relative) => project_root.canonical.join(relative),
+        Err(_) if requested.is_absolute() => requested.to_path_buf(),
+        Err(_) => project_root.canonical.join(requested),
     };
 
-    let file = match system_path_to_file(db, SystemPath::new(file_path.as_str())) {
+    let file = match resolve_file(db, &absolute) {
         Ok(f) => f,
         Err(e) => {
             return JsonRpcResponse::error(
@@ -396,12 +423,11 @@ fn handle_get_types<'db>(
             );
         }
     };
-
     let program_file = ProgramFile::new(db, file, db.project().program(db));
     let include_bindings = params.include_bindings;
     let collect =
         AssertUnwindSafe(|| collector::collect_types(db, program_file, registry, include_bindings));
-    let result = match collector::catch_collect(file_path.as_str(), collect) {
+    let result = match collector::catch_collect(file.path(db).as_str(), collect) {
         Ok(result) => result,
         Err(message) => {
             return JsonRpcResponse::error(request.id.clone(), -32001, message);

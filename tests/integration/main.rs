@@ -781,6 +781,81 @@ fn test_module_names() {
 }
 
 #[test]
+fn a_file_reached_through_symlinks_is_named_from_the_root_it_is_importable_under() {
+    // The package lives under `store/libs/pkg`, and both roots are reached through
+    // symlinks: `exec/libs` links to `store/libs`, and the project root is `link`.
+    let dir = create_test_project(&[
+        ("store/libs/pkg/pkg/__init__.py", ""),
+        ("store/libs/pkg/pkg/core.py", "class Base: ...\n"),
+        ("store/libs/pkg/pkg/sub/__init__.py", ""),
+        (
+            "store/libs/pkg/pkg/sub/impl.py",
+            "from pkg.core import Base\n\n\nclass Impl(Base): ...\n",
+        ),
+        (
+            "exec/ty.toml",
+            "[environment]\nextra-paths = [\"libs/pkg\"]\n",
+        ),
+        ("exec/main.py", "class Thing: ...\n"),
+    ]);
+    std::os::unix::fs::symlink(dir.path().join("store/libs"), dir.path().join("exec/libs"))
+        .unwrap();
+    std::os::unix::fs::symlink(dir.path().join("exec"), dir.path().join("link")).unwrap();
+    let root = dir.path().join("link");
+
+    let responses = run_session(&[
+        &initialize_request(root.to_str().unwrap(), 1),
+        &get_types_request(root.join("libs/pkg/pkg/sub/impl.py").to_str().unwrap(), 2),
+        &get_types_request(root.join("main.py").to_str().unwrap(), 3),
+        &shutdown_request(99),
+    ]);
+
+    // `Base` arrives through an import, so it is named through the search roots however
+    // the file was spelled; the classes declared in the two files have to agree with it.
+    assert_eq!(qualified_name(&responses[1], "Base"), "pkg.core.Base");
+    assert_eq!(qualified_name(&responses[1], "Impl"), "pkg.sub.impl.Impl");
+    assert_eq!(qualified_name(&responses[2], "Thing"), "main.Thing");
+}
+
+#[test]
+fn a_file_symlinked_into_the_project_is_named_from_the_project_root() {
+    // `proj/vendor` links to a directory outside the project, which no search root
+    // covers: the file is importable only as the path it was asked for names it.
+    let dir = create_test_project(&[
+        ("external/vendor/__init__.py", ""),
+        ("external/vendor/mod.py", "class Vendored: ...\n"),
+        ("proj/main.py", "from vendor.mod import Vendored\n"),
+    ]);
+    std::os::unix::fs::symlink(
+        dir.path().join("external/vendor"),
+        dir.path().join("proj/vendor"),
+    )
+    .unwrap();
+    let root = dir.path().join("proj");
+
+    let responses = run_session(&[
+        &initialize_request(root.to_str().unwrap(), 1),
+        &get_types_request(root.join("vendor/mod.py").to_str().unwrap(), 2),
+        &shutdown_request(99),
+    ]);
+
+    assert_eq!(
+        qualified_name(&responses[1], "Vendored"),
+        "vendor.mod.Vendored"
+    );
+}
+
+/// The `qualifiedName` of the one `classLiteral` named `class_name` in a response.
+fn qualified_name(response: &serde_json::Value, class_name: &str) -> serde_json::Value {
+    let types: TypeMap = serde_json::from_value(response["result"]["types"].clone()).unwrap();
+    types
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == class_name)
+        .unwrap_or_else(|| panic!("should have classLiteral for '{class_name}'"))["qualifiedName"]
+        .clone()
+}
+
+#[test]
 fn test_typevar_variance_covariant() {
     let dir = create_test_project(&[(
         "v.py",

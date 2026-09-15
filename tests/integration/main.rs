@@ -1229,7 +1229,11 @@ fn test_known_instance_kind_and_payloads() {
          def base(a: int, b: str, c: float) -> bytes: ...\n\
          p = functools.partial(base, 1)\n\
          non_empty = range(1, 10)\n\
-         empty = range(0)\n",
+         empty = range(0)\n\
+         class Fn:\n\
+         \x20   def __call__(self, x: int) -> str: ...\n\
+         class Holder:\n\
+         \x20   wrapped = staticmethod(Fn())\n",
     )]);
 
     let responses = run_session(&[
@@ -1269,6 +1273,18 @@ fn test_known_instance_kind_and_payloads() {
         emptiness.contains(&true) && emptiness.contains(&false),
         "expected both a non-empty and an empty range, got {emptiness:?}"
     );
+
+    // A method wrapper carries the object it wraps; the `staticmethod[...]` instance
+    // type it falls back to cannot express it.
+    let wrapper = types
+        .values()
+        .find(|t| t["kind"] == "knownInstance" && t["knownInstanceKind"] == "MethodWrapper")
+        .expect("should have a MethodWrapper knownInstance");
+    assert_eq!(wrapper["className"], "staticmethod");
+    let wrapped_id = wrapper["wrappedType"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("method wrapper should carry what it wraps: {wrapper:?}"));
+    assert_eq!(types[&wrapped_id.to_string()]["className"], "Fn");
 }
 
 #[test]

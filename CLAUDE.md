@@ -78,7 +78,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `callable` | Anonymous callable (`Callable[[int], str]`) | `parameters`, `returnType` |
 | `boundMethod` | Bound method (`obj.method`). `className` is the receiver's class, `declaringClassId` the class declaring the method; they disagree on an inherited method | `name`, `className`, `moduleName`, `declaringClassId`, `typeParameters`, `parameters`, `returnType` |
 | `wrapperDescriptor` | Descriptor wrapper (`__get__`, `__set__`) | `descriptorKind`, `parameters`, `returnType` |
-| `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`, `functools.partial(...)`, `range(...)`) | `className`, `knownInstanceKind`, `isNonEmpty`, `wrappedType`, `parameters`, `returnType` |
+| `knownInstance` | Well-known singleton instance (`TypeVar`, `typing.Callable`, `functools.partial(...)`, `range(...)`) | `className`, `moduleName`, `knownInstanceKind`, `isNonEmpty`, `wrappedType`, `parameters`, `returnType` |
 | `intLiteral` | Literal int | `value` |
 | `boolLiteral` | Literal bool | `value` |
 | `stringLiteral` | Literal string | `value` |

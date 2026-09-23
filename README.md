@@ -300,6 +300,7 @@ A well-known singleton instance ty tracks specially, such as `TypeVar`, `typing.
 | Field | Type | Description |
 |---|---|---|
 | `className` | `string` | Class name |
+| `moduleName` | `string` | Defining module *(omitted when empty)* |
 | `knownInstanceKind` | `string` | Which known instance this is |
 | `isNonEmpty` | `boolean` | Whether the instance is known to be non-empty *(omitted when unknown)* |
 | `wrappedType` | `integer` | Type ID of the wrapped type, where the kind wraps one *(omitted otherwise)* |

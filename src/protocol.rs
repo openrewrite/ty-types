@@ -464,6 +464,8 @@ pub enum TypeDescriptor {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
         class_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module_name: Option<String>,
         /// Which singleton this is (`Range`, `FunctoolsPartial`, `TypeVar`, …).
         /// `className` alone cannot distinguish them, since several share a class.
         known_instance_kind: &'static str,

@@ -284,9 +284,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
 
         // Get the callable type from the function expression
         let func_type = call_expr.func.inferred_type(&self.model)?;
-        let callable_type = func_type
-            .try_upcast_to_callable(db, env)?
-            .into_type(db, env);
+        let callable_type = func_type.try_upcast_to_callable(db, env)?.to_type(db, env);
 
         // Build typed arguments so check_types can infer TypeVar specializations
         let call_arguments =

@@ -1308,7 +1308,13 @@ fn test_known_instance_kind_and_payloads() {
          class Fn:\n\
          \x20   def __call__(self, x: int) -> str: ...\n\
          class Holder:\n\
-         \x20   wrapped = staticmethod(Fn())\n",
+         \x20   wrapped = staticmethod(Fn())\n\
+         from typing import NewType\n\
+         UserId = NewType('UserId', int)\n\
+         import dataclasses\n\
+         @dataclasses.dataclass\n\
+         class D:\n\
+         \x20   x: int = dataclasses.field(default=0)\n",
     )]);
 
     let responses = run_session(&[
@@ -1360,6 +1366,18 @@ fn test_known_instance_kind_and_payloads() {
         .as_u64()
         .unwrap_or_else(|| panic!("method wrapper should carry what it wraps: {wrapper:?}"));
     assert_eq!(types[&wrapped_id.to_string()]["className"], "Fn");
+
+    // `moduleName` is the module defining the class, as on the class's own descriptor;
+    // ty looks `NewType` up through `typing_extensions`, but it is defined in `typing`.
+    let module_of = |kind: &str| {
+        types
+            .values()
+            .find(|t| t["kind"] == "knownInstance" && t["knownInstanceKind"] == kind)
+            .unwrap_or_else(|| panic!("should have a {kind} knownInstance"))["moduleName"]
+            .clone()
+    };
+    assert_eq!(module_of("NewType"), "typing");
+    assert_eq!(module_of("Field"), "dataclasses");
 }
 
 #[test]
@@ -1392,6 +1410,31 @@ fn test_type_alias_qualified_name() {
 
     assert_eq!(find("Top")["qualifiedName"], "ta.Top");
     assert_eq!(find("Nested")["qualifiedName"], "ta.Outer.Nested");
+}
+
+#[test]
+fn test_implicit_recursive_alias() {
+    let dir = create_test_project(&[(
+        "ra.py",
+        "R = tuple[int, \"R | None\"]\n\
+         def f(x: R) -> None: ...\n",
+    )]);
+
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("ra.py", 2),
+        &shutdown_request(99),
+    ]);
+
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    let alias = types
+        .values()
+        .find(|t| t["kind"] == "typeAlias" && t["name"] == "R")
+        .unwrap_or_else(|| panic!("should have type alias 'R': {types:?}"));
+    let value_id = alias["valueType"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("alias should carry its unfolded body: {alias:?}"));
+    assert_eq!(types[&value_id.to_string()]["className"], "tuple");
 }
 
 #[test]

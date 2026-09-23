@@ -695,9 +695,9 @@ impl<'db> TypeRegistry<'db> {
             Type::KnownBoundMethod(known_bound) => {
                 let display = self.display_string(ty, db);
                 let class_name = Some(known_bound.class().name(python_version).to_string());
-                let sigs: Vec<_> = known_bound.signatures(db, &env).collect();
-                let (type_parameters, parameters, return_type) = sigs
-                    .first()
+                let (type_parameters, parameters, return_type) = known_bound
+                    .callables(db, &env)
+                    .and_then(|callables| callables.signatures(db).next())
                     .map(|sig| self.build_params_from_signature(sig, db))
                     .unwrap_or((vec![], vec![], None));
                 TypeDescriptor::BoundMethod {
@@ -778,6 +778,23 @@ impl<'db> TypeRegistry<'db> {
                     display,
                     name,
                     qualified_name,
+                    value_type,
+                    type_parameters,
+                }
+            }
+
+            // An implicit alias whose value refers to itself (`R = tuple[int, "R | None"]`).
+            Type::Recursive(recursive) => {
+                let display = self.display_string(ty, db);
+                let value_type = recursive
+                    .unfold(db, &env)
+                    .into_unfolded()
+                    .map(|value_ty| self.register_component(value_ty, db));
+                let type_parameters = self.build_type_parameters(recursive.parameters(db), db);
+                TypeDescriptor::TypeAlias {
+                    display,
+                    name: recursive.name(db).to_string(),
+                    qualified_name: None,
                     value_type,
                     type_parameters,
                 }
@@ -882,7 +899,11 @@ impl<'db> TypeRegistry<'db> {
 
             Type::KnownInstance(ki) => {
                 let display = self.display_string(ty, db);
-                let class_name = ki.class(db).name(python_version).to_string();
+                let class = ki.class(db);
+                let class_name = class.name(python_version).to_string();
+                let module_name = class
+                    .try_to_class_literal(db, &env)
+                    .and_then(|cl| self.resolve_module_name(db, cl.file(db)));
 
                 let is_non_empty = match ki {
                     KnownInstanceType::Range { is_non_empty } => Some(is_non_empty),
@@ -913,6 +934,7 @@ impl<'db> TypeRegistry<'db> {
                 TypeDescriptor::KnownInstance {
                     display,
                     class_name,
+                    module_name,
                     known_instance_kind: Self::known_instance_kind_str(ki),
                     is_non_empty,
                     wrapped_type,
@@ -980,7 +1002,8 @@ impl<'db> TypeRegistry<'db> {
             Type::DataclassDecorator(_)
             | Type::DataclassTransformer(_)
             | Type::SlotDescriptor(_)
-            | Type::Divergent(_) => {
+            | Type::Divergent(_)
+            | Type::RecursiveVar(_) => {
                 let display = self.display_string(ty, db);
                 TypeDescriptor::Other { display }
             }

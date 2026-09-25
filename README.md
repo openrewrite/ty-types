@@ -117,6 +117,26 @@ Returns:
 }
 ```
 
+### `getReadFiles`
+
+Returns every file whose content the session has read since `initialize`, including through requests that failed. Takes no parameters. The list holds:
+
+- the configuration files found — a path ty tried and found missing is not listed;
+- every file under the project root, each read when ty indexes the project for PEP 723 script metadata;
+- each source, stub, `py.typed` and `.pth` file reached through the search roots.
+
+Returns:
+
+```json
+{
+  "readFiles": [ "<absolute path>", ... ]
+}
+```
+
+A file missing from the list can have affected a response only by existing — except the ignore files (`.gitignore`, `.ignore`) that decide which files under the project root are indexed, and, when `TY_UV` is set, the files `uv` reads to describe the workspace.
+
+A path is spelled as ty reached it: a search root with its symlinks resolved, then the path below it as found, so a symlinked file is listed as the link and not its target. Configuration files keep the spelling of the directory ty searched.
+
 ### `shutdown`
 
 Ends the session and exits the server. Returns `{"ok": true}`.

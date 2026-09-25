@@ -2010,6 +2010,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "ruff_db",
+ "ruff_notebook",
  "ruff_python_ast",
  "ruff_text_size",
  "rustc-hash",

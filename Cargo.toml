@@ -16,6 +16,7 @@ ty_python_core = { path = "ruff/crates/ty_python_core" }
 ty_static = { path = "ruff/crates/ty_static" }
 ruff_db = { path = "ruff/crates/ruff_db", default-features = false, features = ["os"] }
 ruff_python_ast = { path = "ruff/crates/ruff_python_ast" }
+ruff_notebook = { path = "ruff/crates/ruff_notebook" }
 ruff_text_size = { path = "ruff/crates/ruff_text_size" }
 
 anyhow = "1.0"

@@ -3,6 +3,7 @@
 mod collector;
 mod project;
 mod protocol;
+mod reads;
 mod registry;
 
 use std::io::{self, BufRead, Write};
@@ -10,9 +11,10 @@ use std::panic::AssertUnwindSafe;
 use std::process;
 
 use protocol::{
-    CliResult, GetTypeRegistryResult, GetTypesParams, GetTypesResult, InitializeParams,
-    InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    CliResult, GetReadFilesResult, GetTypeRegistryResult, GetTypesParams, GetTypesResult,
+    InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResponse,
 };
+use reads::ReadFiles;
 use registry::TypeRegistry;
 use ruff_db::Db as _;
 use ruff_db::files::{File, FileError, system_path_to_file};
@@ -113,7 +115,7 @@ fn run_oneshot(file_args: &[String], project_root_arg: Option<&str>, bindings: b
             .into_owned(),
     };
 
-    let (db, _root) = project::create_database(&root_str).unwrap_or_else(|e| {
+    let (db, _root, _read_files) = project::create_database(&root_str).unwrap_or_else(|e| {
         eprintln!("Error: failed to initialize project: {e}");
         process::exit(1);
     });
@@ -198,8 +200,8 @@ fn run_serve() {
 
         match request.method.as_str() {
             "initialize" => {
-                let (db, root) = match do_initialize(&request) {
-                    Ok(pair) => {
+                let (db, root, read_files) = match do_initialize(&request) {
+                    Ok(session) => {
                         write_response(
                             &stdout,
                             &JsonRpcResponse::success(
@@ -207,7 +209,7 @@ fn run_serve() {
                                 serde_json::to_value(InitializeResult { ok: true }).unwrap(),
                             ),
                         );
-                        pair
+                        session
                     }
                     Err(response) => {
                         write_response(&stdout, &response);
@@ -216,7 +218,7 @@ fn run_serve() {
                 };
 
                 // Enter session loop with persistent registry
-                if run_session(&db, &root, &mut lines, &stdout) {
+                if run_session(&db, &root, &read_files, &mut lines, &stdout) {
                     return; // shutdown requested
                 }
                 // If session ended without shutdown (e.g., re-initialize),
@@ -248,6 +250,7 @@ fn run_serve() {
 fn run_session(
     db: &ProjectDatabase,
     project_root: &ProjectRoot,
+    read_files: &ReadFiles,
     lines: &mut io::Lines<io::StdinLock<'_>>,
     stdout: &io::Stdout,
 ) -> bool {
@@ -282,6 +285,10 @@ fn run_session(
             }
             "getTypeRegistry" => {
                 let response = handle_get_type_registry(&request, &registry);
+                write_response(stdout, &response);
+            }
+            "getReadFiles" => {
+                let response = handle_get_read_files(&request, read_files);
                 write_response(stdout, &response);
             }
             "shutdown" => {
@@ -344,18 +351,19 @@ struct ProjectRoot {
 
 fn do_initialize(
     request: &JsonRpcRequest,
-) -> Result<(ProjectDatabase, ProjectRoot), JsonRpcResponse> {
+) -> Result<(ProjectDatabase, ProjectRoot, ReadFiles), JsonRpcResponse> {
     let params: InitializeParams = serde_json::from_value(request.params.clone()).map_err(|e| {
         JsonRpcResponse::error(request.id.clone(), -32602, format!("Invalid params: {e}"))
     })?;
 
-    let (db, canonical) = project::create_database(&params.project_root).map_err(|e| {
-        JsonRpcResponse::error(
-            request.id.clone(),
-            -32000,
-            format!("Failed to initialize: {e}"),
-        )
-    })?;
+    let (db, canonical, read_files) =
+        project::create_database(&params.project_root).map_err(|e| {
+            JsonRpcResponse::error(
+                request.id.clone(),
+                -32000,
+                format!("Failed to initialize: {e}"),
+            )
+        })?;
 
     Ok((
         db,
@@ -363,6 +371,7 @@ fn do_initialize(
             given: SystemPathBuf::from(params.project_root.as_str()),
             canonical,
         },
+        read_files,
     ))
 }
 
@@ -455,6 +464,14 @@ fn handle_get_type_registry(
 ) -> JsonRpcResponse {
     let response = GetTypeRegistryResult {
         types: registry.all_descriptors(),
+    };
+
+    JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())
+}
+
+fn handle_get_read_files(request: &JsonRpcRequest, read_files: &ReadFiles) -> JsonRpcResponse {
+    let response = GetReadFilesResult {
+        read_files: read_files.to_vec(),
     };
 
     JsonRpcResponse::success(request.id.clone(), serde_json::to_value(response).unwrap())

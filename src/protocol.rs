@@ -91,6 +91,12 @@ pub struct GetTypeRegistryResult {
     pub types: HashMap<TypeId, TypeDescriptor>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetReadFilesResult {
+    pub read_files: Vec<String>,
+}
+
 /// CLI one-shot output: nodes grouped by file, shared type registry.
 #[derive(Debug, Serialize)]
 pub struct CliResult {

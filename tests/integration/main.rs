@@ -80,6 +80,15 @@ fn get_type_registry_request(id: u64) -> String {
     .to_string()
 }
 
+fn get_read_files_request(id: u64) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getReadFiles",
+        "id": id
+    })
+    .to_string()
+}
+
 fn shutdown_request(id: u64) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -2374,5 +2383,43 @@ fn test_a_call_in_a_quoted_annotation_binds_as_it_does_unquoted() {
     assert_eq!(
         calls[0]["callSignature"], calls[1]["callSignature"],
         "a call reached through the sub-model binds as one in the file's own AST does"
+    );
+}
+
+#[test]
+fn read_files_name_what_inference_read_and_not_the_rest_of_a_search_root() {
+    // Indexing the project reads every file under its root, so the file left unread
+    // sits in a search root outside it.
+    let dir = create_test_project(&[
+        (
+            "proj/ty.toml",
+            "[environment]\nextra-paths = [\"../libs\"]\n",
+        ),
+        ("proj/main.py", "from used import x\ny = x\n"),
+        ("libs/used.py", "x: int = 1\n"),
+        ("libs/unused.py", "z: int = 2\n"),
+    ]);
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+
+    let responses = run_session(&[
+        &initialize_request(root.join("proj").to_str().unwrap(), 1),
+        &get_types_request("main.py", 2),
+        &get_read_files_request(3),
+        &shutdown_request(99),
+    ]);
+
+    let read_files: Vec<String> =
+        serde_json::from_value(responses[2]["result"]["readFiles"].clone()).unwrap();
+    let path = |p: &str| root.join(p).to_str().unwrap().to_string();
+    assert!(read_files.contains(&path("proj/ty.toml")), "{read_files:?}");
+    assert!(read_files.contains(&path("libs/used.py")), "{read_files:?}");
+    assert!(
+        !read_files.contains(&path("libs/unused.py")),
+        "{read_files:?}"
+    );
+    // Configuration discovery tries `pyproject.toml` before `ty.toml`.
+    assert!(
+        !read_files.contains(&path("proj/pyproject.toml")),
+        "{read_files:?}"
     );
 }

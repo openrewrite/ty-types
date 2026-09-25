@@ -8,9 +8,10 @@
 
 - `src/main.rs` — JSON-RPC stdio loop with session lifecycle (initialize → getTypes* → shutdown)
 - `src/protocol.rs` — Serde types for JSON-RPC requests/responses and TypeDescriptor enum
-- `src/project.rs` — ProjectDatabase setup using OsSystem and ProjectMetadata::discover
+- `src/project.rs` — ProjectDatabase setup using a RecordingSystem and ProjectMetadata::discover
 - `src/registry.rs` — TypeRegistry: deduplicates Type<'db> → TypeId with structured descriptors
 - `src/collector.rs` — SourceOrderVisitor that walks Python AST, gets types via HasType trait
+- `src/reads.rs` — RecordingSystem: the `System` under the database, recording each file whose content is read
 
 The registry persists across getTypes requests within a session. This works because `run_session()` borrows `&ProjectDatabase` and creates `TypeRegistry<'db>` in the same scope, so the lifetime is naturally shared.
 
@@ -47,7 +48,7 @@ Reach for `--release` only to measure inference speed or ship a binary.
 
 JSON-RPC over stdin/stdout, one JSON object per line.
 
-Methods: `initialize`, `getTypes`, `getTypeRegistry`, `shutdown`.
+Methods: `initialize`, `getTypes`, `getTypeRegistry`, `getReadFiles`, `shutdown`.
 
 A descriptor answers for a type, and the registry dedupes by ty's interned `Type` — `LIMIT = 5` and `CAP = 5` in different modules are one `intLiteral` entry. Anything tied to a *symbol* therefore belongs on `NodeAttribution`, which is where `BindingInfo` lives. See README.md: BindingInfo.
 

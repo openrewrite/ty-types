@@ -892,9 +892,14 @@ impl<'db> TypeRegistry<'db> {
                 }
             }
 
-            Type::PropertyInstance(_) => {
+            Type::PropertyInstance(property) => {
                 let display = self.display_string(ty, db);
-                TypeDescriptor::Property { display }
+                TypeDescriptor::Property {
+                    display,
+                    getter: property.getter(db).map(|t| self.register_component(t, db)),
+                    setter: property.setter(db).map(|t| self.register_component(t, db)),
+                    deleter: property.deleter(db).map(|t| self.register_component(t, db)),
+                }
             }
 
             Type::KnownInstance(ki) => {

@@ -494,7 +494,13 @@ Narrowed truthiness. No additional fields.
 
 #### `property`
 
-A property descriptor. No additional fields.
+A property descriptor.
+
+| Field | Type | Description |
+|---|---|---|
+| `getter` | `integer` | Type ID of the getter. For `@property`, the decorated `function`, whose `returnType` is the property's type *(omitted when the property has none)* |
+| `setter` | `integer` | Type ID of the setter *(omitted for a read-only property)* |
+| `deleter` | `integer` | Type ID of the deleter *(omitted when the property has none)* |
 
 #### `other`
 

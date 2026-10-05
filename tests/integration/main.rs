@@ -2376,3 +2376,73 @@ fn test_a_call_in_a_quoted_annotation_binds_as_it_does_unquoted() {
         "a call reached through the sub-model binds as one in the file's own AST does"
     );
 }
+
+#[test]
+fn test_a_property_names_its_accessors() {
+    let dir = create_test_project(&[
+        (
+            "hook.py",
+            "from remote import Remote\n\
+             \n\
+             class Hook:\n\
+             \x20   @property\n\
+             \x20   def y(self) -> int:\n\
+             \x20       return 1\n\
+             \n\
+             \x20   @property\n\
+             \x20   def z(self) -> str:\n\
+             \x20       return \"\"\n\
+             \n\
+             \x20   @z.setter\n\
+             \x20   def z(self, value: str) -> None: ...\n\
+             \n\
+             \x20   @z.deleter\n\
+             \x20   def z(self) -> None: ...\n",
+        ),
+        (
+            "remote.pyi",
+            "class Remote:\n\
+             \x20   @property\n\
+             \x20   def r(self) -> bytes: ...\n",
+        ),
+    ]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("hook.py", 2),
+        &shutdown_request(99),
+    ]);
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    let by_id = |id: &serde_json::Value| types[&id.as_u64().unwrap().to_string()].clone();
+
+    let property = |class_name: &str, member: &str| {
+        let class = types
+            .values()
+            .find(|t| t["kind"] == "classLiteral" && t["className"] == class_name)
+            .unwrap_or_else(|| panic!("expected a classLiteral for {class_name}"));
+        let entry = class["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == member)
+            .unwrap_or_else(|| panic!("expected member {member} on {class_name}"));
+        let descriptor = by_id(&entry["typeId"]);
+        assert_eq!(descriptor["kind"], "property");
+        descriptor
+    };
+    let returns = |function: &serde_json::Value| {
+        assert_eq!(function["kind"], "function");
+        by_id(&function["returnType"])["display"].clone()
+    };
+
+    let read_only = property("Hook", "y");
+    assert_eq!(returns(&by_id(&read_only["getter"])), "int");
+    assert!(read_only.get("setter").is_none());
+    assert!(read_only.get("deleter").is_none());
+
+    let writable = property("Hook", "z");
+    assert_eq!(returns(&by_id(&writable["setter"])), "None");
+    assert_eq!(returns(&by_id(&writable["deleter"])), "None");
+
+    let stubbed = property("Remote", "r");
+    assert_eq!(returns(&by_id(&stubbed["getter"])), "bytes");
+}

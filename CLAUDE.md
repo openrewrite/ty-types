@@ -95,7 +95,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `typeIs` / `typeGuard` | Type narrowing returns | `narrowedType` / `guardedType` |
 | `newType` | NewType wrapper | `name`, `qualifiedName`, `baseType` |
 | `specialForm` | Typing special form | `name` |
-| `property` | Property descriptor | — |
+| `property` | Property descriptor | `getter`, `setter`, `deleter` |
 | `enumComplement` | Enum instance with one or more canonical members excluded (e.g. `Color & ~Literal[Color.RED]`) | `className`, `moduleName`, `qualifiedName`, `classId`, `excludedNames`, `rest` |
 | `other` | Fallback for unhandled types | — |
 

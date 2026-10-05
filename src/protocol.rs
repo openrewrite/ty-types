@@ -535,6 +535,12 @@ pub enum TypeDescriptor {
     Property {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        getter: Option<TypeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        setter: Option<TypeId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        deleter: Option<TypeId>,
     },
 
     /// An enum instance with one or more canonical members excluded

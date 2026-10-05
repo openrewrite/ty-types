@@ -176,6 +176,8 @@ pub struct TupleElementInfo {
 pub struct ClassMemberInfo {
     pub name: String,
     pub type_id: TypeId,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub instance_attribute: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

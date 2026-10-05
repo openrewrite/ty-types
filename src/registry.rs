@@ -1,6 +1,7 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ty_module_resolver::ResolverFile;
-use ty_python_core::semantic_index;
+use ty_python_core::{attribute_scopes, semantic_index};
+use ty_python_semantic::types::class::StaticClassLiteral;
 use ty_python_semantic::types::display::qualified_name_components_from_scope;
 use ty_python_semantic::types::function::FunctionType;
 use ty_python_semantic::types::infer::original_class_type;
@@ -132,6 +133,53 @@ impl<'db> TypeRegistry<'db> {
         let class = index.class_definition_of_method(body_scope.file_scope_id(db))?;
         let class_literal = original_class_type(db, class)?;
         Some(self.register_component(Type::ClassLiteral(class_literal), db))
+    }
+
+    /// The members `class` defines itself. Its body's names come first, then the
+    /// attributes its methods assign through `self`.
+    fn class_members(
+        &mut self,
+        class: StaticClassLiteral<'db>,
+        db: &'db dyn Db,
+    ) -> Vec<ClassMemberInfo> {
+        let body_scope = class.body_scope(db);
+        let mut names = FxHashSet::default();
+        let mut members = Vec::new();
+        // A name both declared and bound comes back twice, its declaration first.
+        for mwd in list_members::all_end_of_scope_members(db, body_scope) {
+            if names.insert(mwd.member.name.to_string()) {
+                members.push(ClassMemberInfo {
+                    name: mwd.member.name.to_string(),
+                    type_id: self.register_component(mwd.member.ty, db),
+                    instance_attribute: false,
+                });
+            }
+        }
+
+        let index = semantic_index(db, body_scope.program_file(db));
+        for scope in attribute_scopes(db, body_scope) {
+            for place in index.place_table(scope).members() {
+                let Some(name) = place.as_instance_attribute() else {
+                    continue;
+                };
+                if !names.insert(name.to_string()) {
+                    continue;
+                }
+                let Some(ty) = class
+                    .own_instance_member(db, &self.env, name)
+                    .inner
+                    .ignore_possibly_undefined()
+                else {
+                    continue;
+                };
+                members.push(ClassMemberInfo {
+                    name: name.to_string(),
+                    type_id: self.register_component(ty, db),
+                    instance_attribute: true,
+                });
+            }
+        }
+        members
     }
 
     fn display_string(&self, ty: Type<'db>, db: &'db dyn Db) -> Option<String> {
@@ -527,19 +575,8 @@ impl<'db> TypeRegistry<'db> {
                     self.build_type_parameters(class_literal.generic_context(db), db);
                 let supertypes = self.supertypes_from_class_literal(class_literal, db);
 
-                // Extract directly-defined class members (not inherited)
-                let members: Vec<ClassMemberInfo> = match class_literal {
-                    ClassLiteral::Static(static_class) => {
-                        list_members::all_end_of_scope_members(db, static_class.body_scope(db))
-                            .map(|mwd| {
-                                let type_id = self.register_component(mwd.member.ty, db);
-                                ClassMemberInfo {
-                                    name: mwd.member.name.to_string(),
-                                    type_id,
-                                }
-                            })
-                            .collect()
-                    }
+                let members = match class_literal {
+                    ClassLiteral::Static(static_class) => self.class_members(static_class, db),
                     _ => vec![],
                 };
 
@@ -566,16 +603,7 @@ impl<'db> TypeRegistry<'db> {
                     .iter()
                     .map(|&base| self.register_component(base, db))
                     .collect();
-                let members: Vec<ClassMemberInfo> =
-                    list_members::all_end_of_scope_members(db, origin.body_scope(db))
-                        .map(|mwd| {
-                            let type_id = self.register_component(mwd.member.ty, db);
-                            ClassMemberInfo {
-                                name: mwd.member.name.to_string(),
-                                type_id,
-                            }
-                        })
-                        .collect();
+                let members = self.class_members(origin, db);
                 TypeDescriptor::ClassLiteral {
                     display,
                     class_name,

@@ -260,9 +260,9 @@ A class object itself (the value of `type[MyClass]`).
 | `qualifiedName` | `string` | Fully qualified class name *(omitted when empty)* |
 | `typeParameters` | `integer[]` | Generic type parameters (`T`, `U`, ...) *(omitted when empty)* |
 | `supertypes` | `integer[]` | Explicit base classes *(omitted when empty)* |
-| `members` | `ClassMemberInfo[]` | Directly defined class members *(omitted when empty)* |
+| `members` | `ClassMemberInfo[]` | Members the class defines itself, one per name *(omitted when empty)* |
 
-`ClassMemberInfo`: `{ "name": string, "typeId": integer }`
+`ClassMemberInfo`: `{ "name": string, "typeId": integer, "instanceAttribute": true }`. `instanceAttribute` marks an attribute assigned through `self` in one of the class's methods and not defined in its body, and is omitted otherwise. An attribute a base class assigns stays on the base.
 
 #### `subclassOf`
 

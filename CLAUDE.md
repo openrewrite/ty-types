@@ -41,7 +41,7 @@ Reach for `--release` only to measure inference speed or ship a binary.
 
 - The `ruff/` submodule is pinned to a specific commit on `openrewrite/ruff` `ty-types-2` branch, which widens `pub(crate)` → `pub` across `ty_python_semantic`. This gives us access to structured type internals (callable signatures, type var bounds, known instance classes, etc.).
 - Update the submodule with `cd ruff && git fetch origin ty-types-2 && git checkout origin/ty-types-2`.
-- Rust edition 2024, requires Rust 1.96+.
+- Rust edition 2024, requires Rust 1.97+.
 
 ## Wire Protocol
 
@@ -95,7 +95,7 @@ Each type in the registry is represented as a `TypeDescriptor` with a `kind` dis
 | `typeIs` / `typeGuard` | Type narrowing returns | `narrowedType` / `guardedType` |
 | `newType` | NewType wrapper | `name`, `qualifiedName`, `baseType` |
 | `specialForm` | Typing special form | `name` |
-| `property` | Property descriptor | — |
+| `property` | Property descriptor | `getter`, `setter`, `deleter` |
 | `enumComplement` | Enum instance with one or more canonical members excluded (e.g. `Color & ~Literal[Color.RED]`) | `className`, `moduleName`, `qualifiedName`, `classId`, `excludedNames`, `rest` |
 | `other` | Fallback for unhandled types | — |
 

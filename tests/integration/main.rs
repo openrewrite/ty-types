@@ -2376,3 +2376,118 @@ fn test_a_call_in_a_quoted_annotation_binds_as_it_does_unquoted() {
         "a call reached through the sub-model binds as one in the file's own AST does"
     );
 }
+
+#[test]
+fn test_a_property_names_its_accessors() {
+    let dir = create_test_project(&[
+        (
+            "hook.py",
+            "from remote import Remote\n\
+             \n\
+             class Hook:\n\
+             \x20   @property\n\
+             \x20   def y(self) -> int:\n\
+             \x20       return 1\n\
+             \n\
+             \x20   @property\n\
+             \x20   def z(self) -> str:\n\
+             \x20       return \"\"\n\
+             \n\
+             \x20   @z.setter\n\
+             \x20   def z(self, value: str) -> None: ...\n\
+             \n\
+             \x20   @z.deleter\n\
+             \x20   def z(self) -> None: ...\n",
+        ),
+        (
+            "remote.pyi",
+            "class Remote:\n\
+             \x20   @property\n\
+             \x20   def r(self) -> bytes: ...\n",
+        ),
+    ]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("hook.py", 2),
+        &shutdown_request(99),
+    ]);
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    let by_id = |id: &serde_json::Value| types[&id.as_u64().unwrap().to_string()].clone();
+
+    let property = |class_name: &str, member: &str| {
+        let class = types
+            .values()
+            .find(|t| t["kind"] == "classLiteral" && t["className"] == class_name)
+            .unwrap_or_else(|| panic!("expected a classLiteral for {class_name}"));
+        let entry = class["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == member)
+            .unwrap_or_else(|| panic!("expected member {member} on {class_name}"));
+        let descriptor = by_id(&entry["typeId"]);
+        assert_eq!(descriptor["kind"], "property");
+        descriptor
+    };
+    let returns = |function: &serde_json::Value| {
+        assert_eq!(function["kind"], "function");
+        by_id(&function["returnType"])["display"].clone()
+    };
+
+    let read_only = property("Hook", "y");
+    assert_eq!(returns(&by_id(&read_only["getter"])), "int");
+    assert!(read_only.get("setter").is_none());
+    assert!(read_only.get("deleter").is_none());
+
+    let writable = property("Hook", "z");
+    assert_eq!(returns(&by_id(&writable["setter"])), "None");
+    assert_eq!(returns(&by_id(&writable["deleter"])), "None");
+
+    let stubbed = property("Remote", "r");
+    assert_eq!(returns(&by_id(&stubbed["getter"])), "bytes");
+}
+
+#[test]
+fn test_class_members_list_each_name_once_with_the_attributes_its_methods_assign() {
+    let dir = create_test_project(&[(
+        "hook.py",
+        "class Base:\n\
+         \x20   def __init__(self) -> None:\n\
+         \x20       self.inherited = 1\n\
+         \n\
+         class Hook(Base):\n\
+         \x20   declared: str\n\
+         \n\
+         \x20   def __init__(self) -> None:\n\
+         \x20       self.x = 1\n\
+         \x20       self.declared = \"\"\n",
+    )]);
+    let responses = run_session(&[
+        &initialize_request(dir.path().to_str().unwrap(), 1),
+        &get_types_request("hook.py", 2),
+        &shutdown_request(99),
+    ]);
+    let types: TypeMap = serde_json::from_value(responses[1]["result"]["types"].clone()).unwrap();
+    let hook = types
+        .values()
+        .find(|t| t["kind"] == "classLiteral" && t["className"] == "Hook")
+        .expect("expected a classLiteral for Hook");
+    let members = hook["members"].as_array().unwrap();
+    let member = |name: &str| members.iter().find(|m| m["name"] == name).unwrap();
+
+    let mut names: Vec<&str> = members
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["__init__", "declared", "x"]);
+
+    let x = member("x");
+    assert_eq!(x["instanceAttribute"], true);
+    assert_eq!(
+        types[&x["typeId"].as_u64().unwrap().to_string()]["display"],
+        "int"
+    );
+
+    assert!(member("declared").get("instanceAttribute").is_none());
+}

@@ -4,7 +4,7 @@ A Rust CLI that exposes [ty](https://github.com/astral-sh/ty)'s Python type infe
 
 ## Building
 
-Requires Rust 1.96+. The `ruff/` submodule must be checked out first:
+Requires Rust 1.97+. The `ruff/` submodule must be checked out first:
 
 ```bash
 git submodule update --init
@@ -260,9 +260,9 @@ A class object itself (the value of `type[MyClass]`).
 | `qualifiedName` | `string` | Fully qualified class name *(omitted when empty)* |
 | `typeParameters` | `integer[]` | Generic type parameters (`T`, `U`, ...) *(omitted when empty)* |
 | `supertypes` | `integer[]` | Explicit base classes *(omitted when empty)* |
-| `members` | `ClassMemberInfo[]` | Directly defined class members *(omitted when empty)* |
+| `members` | `ClassMemberInfo[]` | Members the class defines itself, one per name *(omitted when empty)* |
 
-`ClassMemberInfo`: `{ "name": string, "typeId": integer }`
+`ClassMemberInfo`: `{ "name": string, "typeId": integer, "instanceAttribute": true }`. `instanceAttribute` marks an attribute assigned through `self` in one of the class's methods and not defined in its body, and is omitted otherwise. An attribute a base class assigns stays on the base.
 
 #### `subclassOf`
 
@@ -494,7 +494,13 @@ Narrowed truthiness. No additional fields.
 
 #### `property`
 
-A property descriptor. No additional fields.
+A property descriptor.
+
+| Field | Type | Description |
+|---|---|---|
+| `getter` | `integer` | Type ID of the getter. For `@property`, the decorated `function`, whose `returnType` is the property's type *(omitted when the property has none)* |
+| `setter` | `integer` | Type ID of the setter *(omitted for a read-only property)* |
+| `deleter` | `integer` | Type ID of the deleter *(omitted when the property has none)* |
 
 #### `other`
 

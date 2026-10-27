@@ -289,9 +289,7 @@ impl<'db, 'reg> TypeCollector<'db, 'reg> {
         // Build typed arguments so check_types can infer TypeVar specializations
         let call_arguments =
             CallArguments::from_arguments_typed(&call_expr.arguments, |splatted_value| {
-                splatted_value
-                    .inferred_type(&self.model)
-                    .unwrap_or(Type::unknown())
+                splatted_value.inferred_type(&self.model)
             });
 
         // Bind parameters and run type checking to resolve specializations

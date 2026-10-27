@@ -313,7 +313,7 @@ impl<'db> TypeRegistry<'db> {
     fn typevar_kind_str(kind: TypeVarKind) -> &'static str {
         match kind {
             TypeVarKind::LegacyTypeVar | TypeVarKind::Pep695TypeVar => "TypeVar",
-            TypeVarKind::TypingSelf => "Self",
+            TypeVarKind::TypingSelf { .. } => "Self",
             TypeVarKind::LegacyParamSpec | TypeVarKind::Pep695ParamSpec => "ParamSpec",
             TypeVarKind::LegacyTypeVarTuple | TypeVarKind::Pep695TypeVarTuple => "TypeVarTuple",
             TypeVarKind::Pep613Alias => "TypeAlias",
